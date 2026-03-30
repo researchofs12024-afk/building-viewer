@@ -176,7 +176,7 @@ html = f"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<script src="https://dapi.kakao.com/v2/maps/sdk.js?appkey={KAKAO_JS_KEY}&libraries=services"></script>
+<script src="https://dapi.kakao.com/v2/maps/sdk.js?appkey={KAKAO_JS_KEY}&libraries=services&autoload=false"></script>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0;}}
@@ -432,7 +432,9 @@ async function callPython(params) {{
   return JSON.parse(m[1]);
 }}
 
-/* ── 카카오맵 초기화 ── */
+/* ── 카카오맵 초기화 (autoload=false → kakao.maps.load() 필수) ── */
+kakao.maps.load(function() {{
+
 const map = new kakao.maps.Map(document.getElementById('map'), {{
   center: new kakao.maps.LatLng(37.5665, 126.9780),
   level : 4,
@@ -671,6 +673,8 @@ function resetAll() {{
 document.addEventListener('keydown', e => {{
   if(e.key==='Escape') document.getElementById('sresults').style.display='none';
 }});
+
+}}); // kakao.maps.load 끝
 </script>
 </body>
 </html>"""
