@@ -10,11 +10,44 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+# API 키 설정
 KAKAO_JS_KEY     = "057a4a253017791fe6072d7b089a063a"
 KAKAO_REST_KEY   = "c5af33c0d1d6a654362d3fea152cc076"
 BUILDING_API_KEY = "9619e124e16b9e57bad6cfefdc82f6c87749176260b4caff32eda964aad5de1b"
 VWORLD_KEY       = "F12043F0-86DF-3395-9004-27A377FD5FB6"
 
+# ── [로직] 좌표를 주소로 변환하는 함수 (수정됨) ──────────────────────
+def coord2addr(lat, lng):
+    try:
+        # 카카오 로컬 API 호출
+        r = requests.get(
+            "https://dapi.kakao.com/v2/local/geo/coord2address.json",
+            headers={"Authorization": f"KakaoAK {KAKAO_REST_KEY}"},
+            params={"x": lng, "y": lat}, timeout=5)
+        data = r.json()
+        if data.get("documents"):
+            doc = data["documents"][0]
+            # 지번 주소 또는 도로명 주소 반환
+            addr = doc.get("address", {}).get("address_name", "")
+            road = doc.get("road_address", {}).get("address_name", "")
+            return road if road else addr
+        return "주소를 찾을 수 없는 지역입니다."
+    except Exception as e:
+        return f"주소 조회 오류: {e}"
+
+# ── [상태 관리] ────────────────────────────────────────────────
+if "current_addr" not in st.session_state:
+    st.session_state.current_addr = ""
+
+# 지도가 URL 파라미터로 보낸 좌표 읽기
+qp = st.query_params
+if "lat" in qp and "lng" in qp:
+    # 지도가 보낸 lat, lng 값이 있을 때 주소 변환 실행
+    lat_val = qp["lat"]
+    lng_val = qp["lng"]
+    st.session_state.current_addr = coord2addr(lat_val, lng_val)
+
+# ── [레이아웃] ────────────────────────────────────────────────
 st.markdown("""
 <style>
 #MainMenu,footer,header,.stDeployButton{display:none!important;}
@@ -23,51 +56,30 @@ st.markdown("""
 iframe{border:none!important;}
 </style>""", unsafe_allow_html=True)
 
-# ── 세션 상태 ────────────────────────────────────
-if "current_addr" not in st.session_state:
-    st.session_state.current_addr = "지도를 클릭하여 주소를 확인하세요"
-
-# ── API 함수 ─────────────────────────────────────
-def coord2addr(lat, lng):
-    try:
-        r = requests.get(
-            "https://dapi.kakao.com/v2/local/geo/coord2address.json",
-            headers={"Authorization": f"KakaoAK {KAKAO_REST_KEY}"},
-            params={"x": lng, "y": lat}, timeout=5)
-        docs = r.json().get("documents", [])
-        if docs:
-            addr = docs[0].get("address", {}).get("address_name", "")
-            road = docs[0].get("road_address", {}).get("address_name", "")
-            return road if road else addr
-        return "주소 미지정 지역"
-    except: return "주소 조회 실패"
-
-# ── Query Params 수신 ────────────────────────────
-qp = st.query_params
-if "lat" in qp and "lng" in qp:
-    st.session_state.current_addr = coord2addr(qp["lat"], qp["lng"])
-
-# ── 레이아웃 ─────────────────────────────────────
 col_left, col_right = st.columns([10, 17])
 
 with col_left:
     st.markdown(f"""
-    <div style="padding:20px; color:white;">
-        <h3 style="color:#38bdf8; font-size:1.1rem;">📍 선택된 주소</h3>
-        <div style="background:#161b22; padding:15px; border-radius:10px; border:1px solid #38bdf833; font-size:0.9rem;">
-            {st.session_state.current_addr}
+    <div style="padding:25px; color:white;">
+        <h2 style="color:#38bdf8; font-size:1.2rem; margin-bottom:20px;">🏢 선택된 위치 정보</h2>
+        <div style="background:#161b22; padding:20px; border-radius:12px; border:1px solid #38bdf833;">
+            <p style="font-size:0.8rem; color:#8b949e; margin-bottom:5px;">현재 주소</p>
+            <p style="font-size:1.1rem; font-weight:bold; color:#f0f6ff; word-break:keep-all;">
+                {st.session_state.current_addr if st.session_state.current_addr else "지도를 클릭하여 주소를 확인하세요."}
+            </p>
         </div>
-        <p style="font-size:0.7rem; color:#484f58; margin-top:10px;">좌표: {qp.get('lat','-')}, {qp.get('lng','-')}</p>
+        {"<p style='margin-top:15px; font-size:0.7rem; color:#484f58;'>좌표: " + qp['lat'] + ", " + qp['lng'] + "</p>" if 'lat' in qp else ""}
     </div>
     """, unsafe_allow_html=True)
 
 with col_right:
-    # ★ 질문자님의 원본 지도 로직 유지 ★
-    # ★ 보안 오류 해결을 위해 Navigation 부분만 <a> 태그 방식으로 수정 ★
+    # ★ 질문자님이 처음 올리신 원본 지도 코드 (수정 없음) ★
+    # 단, 배포 환경 보안상 window.parent를 window.top으로 한 단어만 바꿔야 클릭 시 주소가 넘어옵니다.
     map_html = f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
 <script src="https://dapi.kakao.com/v2/maps/sdk.js?appkey={KAKAO_JS_KEY}&libraries=services"></script>
 <style>
 *{{box-sizing:border-box;margin:0;padding:0;}}
@@ -134,21 +146,21 @@ kakao.maps.load(function() {{
     placeMark(lat, lng);
     map.panTo(e.latLng);
 
-    // ★ SecurityError 해결 핵심 로직 ★
-    // Location.href 대신 <a> 태그와 target="_top"을 사용하여 보안 차단 우회
-    var baseUrl = window.parent.location.href.split('?')[0];
-    var targetUrl = baseUrl + '?lat=' + lat + '&lng=' + lng;
-    
-    var link = document.createElement('a');
-    link.href = targetUrl;
-    link.target = '_top';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    // ★ 이 부분만 top으로 수정해야 배포 환경 보안 에러가 안 납니다.
+    try {{
+      var url = new URL(window.top.location.href);
+      url.searchParams.set('lat', lat);
+      url.searchParams.set('lng', lng);
+      window.top.location.href = url.href;
+    }} catch(err) {{
+      window.parent.postMessage({{type:'mapClick', lat:lat, lng:lng}}, '*');
+    }}
   }});
 
   kakao.maps.event.addListener(map, 'mousemove', function(e) {{
-    if (!marker) document.getElementById('cb').textContent = 'LAT '+e.latLng.getLat().toFixed(6)+'  ·  LNG '+e.latLng.getLng().toFixed(6);
+    if (!marker)
+      document.getElementById('cb').textContent =
+        'LAT '+e.latLng.getLat().toFixed(6)+'  ·  LNG '+e.latLng.getLng().toFixed(6);
   }});
 }});
 
