@@ -11,13 +11,12 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# API 키 (질문자님 설정 유지)
+# API 키 설정 (질문자님 키 그대로 유지)
 KAKAO_JS_KEY     = "057a4a253017791fe6072d7b089a063a"
 KAKAO_REST_KEY   = "c5af33c0d1d6a654362d3fea152cc076"
 BUILDING_API_KEY = "9619e124e16b9e57bad6cfefdc82f6c87749176260b4caff32eda964aad5de1b"
 VWORLD_KEY       = "F12043F0-86DF-3395-9004-27A377FD5FB6"
 
-# 스타일 설정 유지
 st.markdown("""
 <style>
 #MainMenu,footer,header,.stDeployButton{display:none!important;}
@@ -38,13 +37,12 @@ for k, v in {
     if k not in st.session_state:
         st.session_state[k] = v
 
-# ── API 함수 (이 부분의 '호출 방식'만 수정하여 인증 오류 해결) ────────────────
+# ── API 함수 (디코딩 문제 해결을 위해 params 방식으로 수정) ─────────────
 def fetch_building(sigungu, bjdong, bun, ji):
-    def get_data(ep):
-        # f-string 대신 params를 사용하여 API 키 인코딩 깨짐 방지
+    def mk_request(ep):
         url = f"http://apis.data.go.kr/1613000/BldRgstService_v2/{ep}"
         params = {
-            "serviceKey": requests.utils.unquote(BUILDING_API_KEY), # 인코딩된 키 중복 인코딩 방지
+            "serviceKey": requests.utils.unquote(BUILDING_API_KEY), # 키 깨짐 방지
             "sigunguCd": sigungu,
             "bjdongCd": bjdong,
             "platGbCd": "0",
@@ -55,12 +53,25 @@ def fetch_building(sigungu, bjdong, bun, ji):
         }
         try:
             r = requests.get(url, params=params, timeout=10)
-            root = ET.fromstring(r.text)
-            return {"items": [{c.tag:(c.text or "") for c in i} for i in root.findall(".//item")]}
-        except:
-            return {"items": []}
+            return r.text
+        except: return ""
 
-    return {"basis": get_data("getBrBasisOulnInfo"), "title": get_data("getBrTitleInfo")}
+    def parse(txt):
+        if not txt: return {"error": "통신 오류"}
+        try:
+            root = ET.fromstring(txt)
+            code = root.find(".//resultCode")
+            if code is not None and code.text != "00":
+                msg = root.find(".//resultMsg")
+                return {"error": msg.text if msg else "API 오류"}
+            return {"items": [{c.tag:(c.text or "") for c in i}
+                               for i in root.findall(".//item")]}
+        except Exception as e:
+            return {"error": str(e)}
+
+    r1_txt = mk_request("getBrBasisOulnInfo")
+    r2_txt = mk_request("getBrTitleInfo")
+    return {"basis": parse(r1_txt), "title": parse(r2_txt)}
 
 def coord2addr(lat, lng):
     try:
@@ -83,7 +94,7 @@ def addr_search(query):
     except:
         return []
 
-# ── query_params로 지도 클릭 수신 로직 유지 ────────────────
+# ── query_params로 지도 클릭 수신 ────────────────
 qp = st.query_params
 if "lat" in qp and "lng" in qp:
     try:
@@ -110,8 +121,10 @@ if "lat" in qp and "lng" in qp:
 # ── 레이아웃 ─────────────────────────────────────
 col_left, col_right = st.columns([10, 17], gap="small")
 
+# ══════════════════════════════════════════════════
+# 우측: 카카오맵 (로직 100% 동일)
+# ══════════════════════════════════════════════════
 with col_right:
-    # ★ 질문자님이 작성하신 지도 HTML/JS 로직 100% 동일 ★
     map_html = f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -236,7 +249,116 @@ function placeMark(lat, lng) {{
 </html>"""
     components.html(map_html, height=780, scrolling=False)
 
+# ══════════════════════════════════════════════════
+# 좌측: 정보 패널 (디자인 100% 복구)
+# ══════════════════════════════════════════════════
 with col_left:
-    # ... (질문자님의 좌측 UI 코드 유지)
-    if st.session_state.building_data:
-        st.write(st.session_state.building_data) # 데이터 들어오는지 확인용
+    # 헤더 복구
+    st.markdown("""
+<div style="background:#0d1117;border-bottom:1px solid rgba(255,255,255,.07);
+  padding:12px 14px;margin-bottom:12px;">
+  <div style="display:flex;align-items:center;gap:9px;">
+    <div style="width:28px;height:28px;background:linear-gradient(135deg,#38bdf8,#10b981);
+      border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:14px;">🏢</div>
+    <div>
+      <div style="font-size:.82rem;font-weight:700;color:#f0f6ff;">건축물대장 조회</div>
+      <div style="font-size:.56rem;color:#484f58;font-family:monospace;">KAKAO MAPS · VWORLD</div>
+    </div>
+    <div style="margin-left:auto;background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.25);
+      color:#10b981;padding:2px 8px;border-radius:20px;font-size:.6rem;font-weight:600;">● LIVE</div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+    # 주소 검색 복구
+    st.markdown('<p style="font-size:.62rem;font-weight:700;color:#38bdf8;letter-spacing:.1em;text-transform:uppercase;margin-bottom:5px;">🔍 주소 검색</p>', unsafe_allow_html=True)
+    query = st.text_input("주소", placeholder="예: 강남구 테헤란로 152",
+                          label_visibility="collapsed", key="addr_q")
+    
+    if st.button("검색", use_container_width=True, key="search_btn"):
+        if query:
+            with st.spinner("검색 중..."):
+                results = addr_search(query)
+            if results:
+                for doc in results:
+                    road = doc.get("road_address")
+                    main = road["address_name"] if road else doc["address_name"]
+                    if st.button(f"📍 {main}", key=f"r_{doc['address_name']}", use_container_width=True):
+                        lat = float(doc["y"]); lng = float(doc["x"])
+                        st.query_params.update(lat=lat, lng=lng)
+                        st.rerun()
+            else:
+                st.warning("검색 결과가 없습니다.")
+
+    st.divider()
+
+    # 건축물 정보 표시 로직 복구
+    def fa(v):
+        try: return f"{float(v):,.2f} ㎡"
+        except: return v or "-"
+    def fd(v):
+        if v and len(v) == 8: return f"{v[:4]}.{v[4:6]}.{v[6:]}"
+        return v or "-"
+
+    if st.session_state.building_data is None:
+        st.markdown("""
+<div style="background:#161b22;border:1px dashed rgba(56,189,248,.15);border-radius:10px;
+  padding:24px 14px;text-align:center;margin-top:8px;">
+  <div style="font-size:1.8rem;margin-bottom:8px;">🗺️</div>
+  <div style="font-size:.8rem;font-weight:600;color:#c9d1d9;margin-bottom:5px;">지도를 클릭하세요</div>
+  <div style="font-size:.7rem;color:#484f58;line-height:1.7;">
+    지도의 원하는 위치를 클릭하면<br>
+    <strong style="color:#38bdf8;">건축물대장 정보</strong>가 표시됩니다.
+  </div>
+</div>""", unsafe_allow_html=True)
+
+    else:
+        bd_data = st.session_state.building_data
+        addr    = st.session_state.current_addr
+
+        if "error" in bd_data.get("basis", {}):
+            st.error(f"오류: {bd_data['basis']['error']}")
+        else:
+            basis_items = bd_data.get("basis", {}).get("items", [])
+            title_items = bd_data.get("title", {}).get("items", [])
+
+            if not basis_items and not title_items:
+                st.warning("해당 위치의 건축물 정보가 없습니다.")
+            else:
+                if addr: st.caption(f"📍 {addr}")
+
+                for item in basis_items:
+                    st.markdown(f"""
+<div style="background:#161b22;border:1px solid rgba(56,189,248,.15);border-radius:10px;
+  padding:13px;margin-bottom:10px;">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:9px;">
+    <div style="width:30px;height:30px;background:linear-gradient(135deg,rgba(56,189,248,.15),rgba(16,185,129,.15));
+      border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:13px;
+      border:1px solid rgba(56,189,248,.15);">🏢</div>
+    <div>
+      <div style="font-size:.82rem;font-weight:700;color:#f0f6ff;">{item.get('bldNm') or '건물명 미등록'}</div>
+      <div style="font-size:.65rem;color:#484f58;">{addr}</div>
+    </div>
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:9px;">
+    <span style="background:rgba(56,189,248,.12);color:#38bdf8;border:1px solid rgba(56,189,248,.2);
+      font-size:.6rem;font-weight:600;padding:2px 6px;border-radius:4px;">{item.get('mainPurpsCdNm') or '-'}</span>
+    <span style="background:rgba(16,185,129,.12);color:#10b981;border:1px solid rgba(16,185,129,.2);
+      font-size:.6rem;font-weight:600;padding:2px 6px;border-radius:4px;">{item.get('strctCdNm') or '-'}</span>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
+    <div style="background:#07090f;border:1px solid rgba(255,255,255,.04);border-radius:5px;padding:7px;">
+      <div style="font-size:.55rem;font-weight:600;color:#484f58;text-transform:uppercase;margin-bottom:2px;">연면적</div>
+      <div style="font-size:.73rem;color:#38bdf8;font-family:monospace;">{fa(item.get("totArea"))}</div>
+    </div>
+    <div style="background:#07090f;border:1px solid rgba(255,255,255,.04);border-radius:5px;padding:7px;">
+      <div style="font-size:.55rem;font-weight:600;color:#484f58;text-transform:uppercase;margin-bottom:2px;">층수</div>
+      <div style="font-size:.73rem;color:#c9d1d9;font-family:monospace;">{item.get("grndFlCnt")}F/{item.get("undgrndFlCnt")}B</div>
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+        if st.button("↺ 초기화", use_container_width=True):
+            st.session_state.building_data = None
+            st.session_state.current_addr = ""
+            st.query_params.clear()
+            st.rerun()
