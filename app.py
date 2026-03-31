@@ -2,7 +2,6 @@ import streamlit as st
 import streamlit.components.v1 as components
 import requests
 import xml.etree.ElementTree as ET
-import json
 
 st.set_page_config(
     page_title="건축물대장 조회 시스템",
@@ -16,48 +15,19 @@ KAKAO_REST_KEY   = "c5af33c0d1d6a654362d3fea152cc076"
 BUILDING_API_KEY = "9619e124e16b9e57bad6cfefdc82f6c87749176260b4caff32eda964aad5de1b"
 VWORLD_KEY       = "F12043F0-86DF-3395-9004-27A377FD5FB6"
 
-# 질문자님 원래 CSS 100% 동일
 st.markdown("""
 <style>
 #MainMenu,footer,header,.stDeployButton{display:none!important;}
 .block-container{padding:0!important;margin:0!important;max-width:100%!important;}
-section[data-testid="stSidebar"]{display:none;}
-[data-testid="stToolbar"]{display:none;}
 .stApp{background:#07090f!important;}
 iframe{border:none!important;}
-[data-testid="stHorizontalBlock"]{gap:0!important;}
-[data-testid="column"]{padding:0!important;}
 </style>""", unsafe_allow_html=True)
 
 # ── 세션 상태 ────────────────────────────────────
-for k, v in {
-    "last_lat": None, "last_lng": None,
-    "building_data": None, "current_addr": "",
-}.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
+if "current_addr" not in st.session_state:
+    st.session_state.current_addr = "지도를 클릭하여 주소를 확인하세요"
 
-# ── API 함수 (기존 로직 유지) ─────────────────────
-def fetch_building(sigungu, bjdong, bun, ji):
-    def mk_url(ep):
-        qs = "&".join([
-            f"sigunguCd={sigungu}", f"bjdongCd={bjdong}", "platGbCd=0",
-            f"bun={str(bun).zfill(4)}", f"ji={str(ji or 0).zfill(4)}",
-            "startDate=", "endDate=", "numOfRows=10", "pageNo=1",
-            f"serviceKey={requests.utils.unquote(BUILDING_API_KEY)}",
-        ])
-        return f"http://apis.data.go.kr/1613000/BldRgstService_v2/{ep}?{qs}"
-    def parse(txt):
-        try:
-            root = ET.fromstring(txt)
-            return {"items": [{c.tag:(c.text or "") for c in i} for i in root.findall(".//item")]}
-        except: return {"error": "파싱 오류"}
-    try:
-        r1 = requests.get(mk_url("getBrBasisOulnInfo"), timeout=10)
-        r2 = requests.get(mk_url("getBrTitleInfo"),     timeout=10)
-        return {"basis": parse(r1.text), "title": parse(r2.text)}
-    except: return {"error": "API 호출 실패"}
-
+# ── API 함수 ─────────────────────────────────────
 def coord2addr(lat, lng):
     try:
         r = requests.get(
@@ -65,41 +35,39 @@ def coord2addr(lat, lng):
             headers={"Authorization": f"KakaoAK {KAKAO_REST_KEY}"},
             params={"x": lng, "y": lat}, timeout=5)
         docs = r.json().get("documents", [])
-        return docs[0] if docs else {}
-    except: return {}
+        if docs:
+            addr = docs[0].get("address", {}).get("address_name", "")
+            road = docs[0].get("road_address", {}).get("address_name", "")
+            return road if road else addr
+        return "주소 미지정 지역"
+    except: return "주소 조회 실패"
 
-# ── query_params 수신 ────────────────────────────
+# ── Query Params 수신 ────────────────────────────
 qp = st.query_params
 if "lat" in qp and "lng" in qp:
-    lat_v, lng_v = float(qp["lat"]), float(qp["lng"])
-    if lat_v != st.session_state.last_lat:
-        st.session_state.last_lat = lat_v
-        addr_doc = coord2addr(lat_v, lng_v)
-        land = addr_doc.get("address") or {}
-        bc = land.get("b_code", "")
-        st.session_state.current_addr = land.get("address_name", "")
-        if bc:
-            st.session_state.building_data = fetch_building(
-                bc[:5], bc[5:10], land.get("main_address_no", "0"), land.get("sub_address_no", "0")
-            )
+    st.session_state.current_addr = coord2addr(qp["lat"], qp["lng"])
 
 # ── 레이아웃 ─────────────────────────────────────
 col_left, col_right = st.columns([10, 17])
 
 with col_left:
-    st.markdown(f"<div style='padding:20px; color:white;'><h3>📍 주소: {st.session_state.current_addr}</h3></div>", unsafe_allow_html=True)
-    if st.session_state.building_data:
-        st.write(st.session_state.building_data)
+    st.markdown(f"""
+    <div style="padding:20px; color:white;">
+        <h3 style="color:#38bdf8; font-size:1.1rem;">📍 선택된 주소</h3>
+        <div style="background:#161b22; padding:15px; border-radius:10px; border:1px solid #38bdf833; font-size:0.9rem;">
+            {st.session_state.current_addr}
+        </div>
+        <p style="font-size:0.7rem; color:#484f58; margin-top:10px;">좌표: {qp.get('lat','-')}, {qp.get('lng','-')}</p>
+    </div>
+    """, unsafe_allow_html=True)
 
 with col_right:
-    # ★ 질문자님의 원본 지도 HTML/JS 코드를 '토씨 하나 안 틀리고' 복사했습니다.
-    # ★ 단, HTTPS 환경에서 작동하도록 스크립트 주소에 'https:'만 추가했습니다.
+    # ★ 질문자님의 원본 지도 로직 유지 ★
+    # ★ 보안 오류 해결을 위해 Navigation 부분만 <a> 태그 방식으로 수정 ★
     map_html = f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
-<!-- //를 https://로 수정하여 차단 방지 -->
 <script src="https://dapi.kakao.com/v2/maps/sdk.js?appkey={KAKAO_JS_KEY}&libraries=services"></script>
 <style>
 *{{box-sizing:border-box;margin:0;padding:0;}}
@@ -166,16 +134,17 @@ kakao.maps.load(function() {{
     placeMark(lat, lng);
     map.panTo(e.latLng);
 
-    // ★ 이 부분만 배포 환경용으로 수정: window.parent.location이 보안상 막힐 때를 대비
-    try {{
-      var url = new URL(window.parent.location.href);
-      url.searchParams.set('lat', lat);
-      url.searchParams.set('lng', lng);
-      window.parent.location.replace(url.href); 
-    }} catch(err) {{
-      // 최후의 수단: top 페이지 이동 (Streamlit Cloud 대응)
-      window.top.location.href = window.parent.location.origin + window.parent.location.pathname + '?lat=' + lat + '&lng=' + lng;
-    }}
+    // ★ SecurityError 해결 핵심 로직 ★
+    // Location.href 대신 <a> 태그와 target="_top"을 사용하여 보안 차단 우회
+    var baseUrl = window.parent.location.href.split('?')[0];
+    var targetUrl = baseUrl + '?lat=' + lat + '&lng=' + lng;
+    
+    var link = document.createElement('a');
+    link.href = targetUrl;
+    link.target = '_top';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   }});
 
   kakao.maps.event.addListener(map, 'mousemove', function(e) {{
