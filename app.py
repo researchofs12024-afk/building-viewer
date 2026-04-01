@@ -28,7 +28,7 @@ iframe{border:none!important;}
 [data-testid="column"]{padding:0!important;}
 </style>""", unsafe_allow_html=True)
 
-# ── 세션 상태 ────────────────────────────────────
+# ── 세션 상태 ─────────────────────────────────────
 for k, v in {
     "last_lat": None, "last_lng": None,
     "building_data": None, "current_addr": "",
@@ -36,7 +36,7 @@ for k, v in {
     if k not in st.session_state:
         st.session_state[k] = v
 
-# ── API 함수 ─────────────────────────────────────
+# ── API 함수 ──────────────────────────────────────
 def fetch_building(sigungu, bjdong, bun, ji):
     def mk_url(ep):
         qs = "&".join([
@@ -85,39 +85,29 @@ def addr_search(query):
     except:
         return []
 
-# ── query_params로 지도 클릭 수신 ────────────────
-qp = st.query_params
-if "lat" in qp and "lng" in qp:
-    try:
-        lat_v = float(qp["lat"])
-        lng_v = float(qp["lng"])
-        if lat_v != st.session_state.last_lat or lng_v != st.session_state.last_lng:
-            st.session_state.last_lat = lat_v
-            st.session_state.last_lng = lng_v
-            addr_doc = coord2addr(lat_v, lng_v)
-            land = addr_doc.get("address") or {}
-            road = addr_doc.get("road_address") or {}
-            display_addr = road.get("address_name") or land.get("address_name") or ""
-            bc = land.get("b_code", "")
-            st.session_state.current_addr = display_addr
-            st.session_state.building_data = fetch_building(
-                bc[:5], bc[5:10] if len(bc) >= 10 else "",
-                land.get("main_address_no", "0"),
-                land.get("sub_address_no", "0")
-            )
-            st.query_params.clear()
-    except:
-        pass
-
-# ── 레이아웃 ─────────────────────────────────────
-col_left, col_right = st.columns([10, 17], gap="small")
+def process_click(lat, lng):
+    """좌표 클릭 처리: 역지오코딩 → 건축물대장 조회"""
+    addr_doc = coord2addr(lat, lng)
+    land = addr_doc.get("address") or {}
+    road = addr_doc.get("road_address") or {}
+    display_addr = road.get("address_name") or land.get("address_name") or f"{lat:.5f},{lng:.5f}"
+    bc = land.get("b_code", "")
+    st.session_state.current_addr = display_addr
+    st.session_state.building_data = fetch_building(
+        bc[:5], bc[5:10] if len(bc) >= 10 else "",
+        land.get("main_address_no", "0"),
+        land.get("sub_address_no", "0")
+    )
+    st.session_state.last_lat = lat
+    st.session_state.last_lng = lng
 
 # ══════════════════════════════════════════════════
-# 우측: 카카오맵
+# 지도 HTML — Streamlit.setComponentValue() 방식
+# ★ iframe sandbox 안에서 parent로 데이터 보내는
+#   Streamlit 공식 양방향 통신 채널 사용
 # ══════════════════════════════════════════════════
-with col_right:
-    # 지도 클릭 시 parent URL에 ?lat=..&lng=.. 추가 → Streamlit이 읽음
-    map_html = f"""<!DOCTYPE html>
+MAP_HTML = f"""
+<!DOCTYPE html>
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
@@ -127,29 +117,36 @@ with col_right:
 *{{box-sizing:border-box;margin:0;padding:0;}}
 :root{{--ac:#38bdf8;--gr:#10b981;--am:#f59e0b;--t2:#8b949e;--t3:#484f58;
   --bd:rgba(255,255,255,.07);--bd2:rgba(56,189,248,.22);}}
-html,body{{height:100%;overflow:hidden;background:#07090f;}}
+html,body{{height:100%;overflow:hidden;background:#07090f;font-family:'Noto Sans KR',-apple-system,sans-serif;}}
 #map{{width:100%;height:100vh;}}
 #lc{{position:absolute;top:12px;left:12px;z-index:400;display:flex;flex-direction:column;gap:4px;}}
-.lb{{background:rgba(7,9,15,.88);border:1px solid rgba(56,189,248,.18);color:var(--t2);
+.lb{{background:rgba(7,9,15,.9);border:1px solid rgba(56,189,248,.2);color:var(--t2);
   border-radius:7px;font-size:.68rem;font-weight:600;padding:7px 10px;cursor:pointer;
   transition:all .2s;backdrop-filter:blur(12px);display:flex;align-items:center;gap:5px;
-  font-family:'Noto Sans KR',-apple-system,sans-serif;border-style:solid;}}
-.lb:hover{{background:rgba(56,189,248,.1);border-color:rgba(56,189,248,.4);color:#c9d1d9;}}
-.lb.on{{background:rgba(56,189,248,.15);border-color:var(--ac);color:var(--ac);}}
+  font-family:inherit;border-style:solid;}}
+.lb:hover{{background:rgba(56,189,248,.12);border-color:rgba(56,189,248,.5);color:#c9d1d9;}}
+.lb.on{{background:rgba(56,189,248,.18);border-color:var(--ac);color:var(--ac);}}
 #zc{{position:absolute;top:12px;right:12px;z-index:400;display:flex;flex-direction:column;gap:4px;}}
 .sq{{width:32px;height:32px;padding:0;justify-content:center;font-size:.9rem;}}
-#cb{{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);z-index:400;
-  background:rgba(7,9,15,.88);border:1px solid var(--bd);border-radius:20px;
-  padding:4px 12px;font-family:monospace;font-size:.61rem;color:var(--t3);
-  backdrop-filter:blur(12px);pointer-events:none;white-space:nowrap;}}
-#ch{{position:absolute;bottom:44px;left:50%;transform:translateX(-50%);z-index:400;
-  background:rgba(7,9,15,.9);border:1px solid var(--bd2);border-radius:20px;
-  padding:5px 13px;font-size:.66rem;color:var(--ac);
+#cb{{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);z-index:400;
+  background:rgba(7,9,15,.9);border:1px solid rgba(255,255,255,.1);border-radius:20px;
+  padding:5px 14px;font-family:monospace;font-size:.62rem;color:var(--t3);
+  backdrop-filter:blur(12px);pointer-events:none;white-space:nowrap;transition:color .3s;}}
+#ch{{position:absolute;bottom:50px;left:50%;transform:translateX(-50%);z-index:400;
+  background:rgba(7,9,15,.92);border:1px solid var(--bd2);border-radius:20px;
+  padding:5px 14px;font-size:.67rem;color:var(--ac);
   backdrop-filter:blur(12px);pointer-events:none;}}
+#loading{{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:500;
+  background:rgba(7,9,15,.92);border:1px solid var(--bd2);border-radius:12px;
+  padding:14px 22px;font-size:.74rem;color:var(--ac);display:none;
+  backdrop-filter:blur(16px);align-items:center;gap:10px;}}
+.sp{{width:16px;height:16px;border:2px solid rgba(56,189,248,.2);
+  border-top-color:var(--ac);border-radius:50%;animation:spin .7s linear infinite;}}
+@keyframes spin{{to{{transform:rotate(360deg);}}}}
 @keyframes cp{{0%{{transform:translate(-50%,-50%) scale(.5);opacity:1;}}
-100%{{transform:translate(-50%,-50%) scale(3);opacity:0;}}}}
-.cp{{position:absolute;width:26px;height:26px;border:2px solid var(--ac);border-radius:50%;
-  pointer-events:none;animation:cp .6s ease-out forwards;z-index:500;}}
+100%{{transform:translate(-50%,-50%) scale(3.5);opacity:0;}}}}
+.cp{{position:absolute;width:24px;height:24px;border:2px solid var(--ac);border-radius:50%;
+  pointer-events:none;animation:cp .6s ease-out forwards;z-index:600;}}
 </style>
 </head>
 <body>
@@ -165,7 +162,38 @@ html,body{{height:100%;overflow:hidden;background:#07090f;}}
 </div>
 <div id="cb">지도를 클릭하면 건축물대장이 조회됩니다</div>
 <div id="ch">🖱 지도 클릭 → 즉시 조회</div>
+<div id="loading"><div class="sp"></div>조회 중...</div>
+
 <script>
+// ── Streamlit 양방향 통신 채널 ──────────────────
+// Streamlit이 iframe에 주입하는 공식 메시지 핸들러
+// setComponentValue()로 Python으로 데이터 전송
+function sendValue(data) {{
+  // Streamlit 내부 postMessage 프로토콜
+  window.parent.postMessage({{
+    isStreamlitMessage: true,
+    type: "streamlit:setComponentValue",
+    value: data,
+  }}, "*");
+}}
+
+// Streamlit 컴포넌트 준비 신호
+function setFrameHeight(h) {{
+  window.parent.postMessage({{
+    isStreamlitMessage: true,
+    type: "streamlit:setFrameHeight",
+    height: h,
+  }}, "*");
+}}
+
+// 컴포넌트 준비 완료 신호
+window.parent.postMessage({{
+  isStreamlitMessage: true,
+  type: "streamlit:componentReady",
+  apiVersion: 1,
+}}, "*");
+
+// ── 카카오맵 ────────────────────────────────────
 var map, marker, circle, jijeokOn = false;
 
 kakao.maps.load(function() {{
@@ -173,6 +201,8 @@ kakao.maps.load(function() {{
     center: new kakao.maps.LatLng(37.5665, 126.9780),
     level: 4,
   }});
+
+  setFrameHeight(document.body.scrollHeight);
 
   // VWorld 지적도
   kakao.maps.Tileset.add('VW_LP', new kakao.maps.Tileset({{
@@ -182,29 +212,42 @@ kakao.maps.load(function() {{
     }},
   }}));
 
-  // 지도 클릭 → parent URL 변경 → Streamlit 인식
+  // 지도 클릭 → Streamlit으로 좌표 전송
   kakao.maps.event.addListener(map, 'click', function(e) {{
     var lat = e.latLng.getLat(), lng = e.latLng.getLng();
+    
     document.getElementById('cb').textContent =
       'LAT '+lat.toFixed(6)+'  ·  LNG '+lng.toFixed(6);
-    document.getElementById('ch').style.display='none';
+    document.getElementById('ch').style.display = 'none';
+    document.getElementById('loading').style.display = 'flex';
+    
     placeMark(lat, lng);
     map.panTo(e.latLng);
-
-    // ★ 핵심: parent(Streamlit) URL에 파라미터 추가 후 새로고침
-    try {{
-      var parentUrl = window.parent.location.href.split('?')[0];
-      window.parent.location.href = parentUrl + '?lat=' + lat + '&lng=' + lng;
-    }} catch(err) {{
-      // cross-origin fallback: postMessage
-      window.parent.postMessage({{type:'mapClick', lat:lat, lng:lng}}, '*');
-    }}
+    
+    // Python으로 좌표 전송
+    sendValue({{action: 'click', lat: lat, lng: lng}});
   }});
 
   kakao.maps.event.addListener(map, 'mousemove', function(e) {{
     if (!marker)
       document.getElementById('cb').textContent =
         'LAT '+e.latLng.getLat().toFixed(6)+'  ·  LNG '+e.latLng.getLng().toFixed(6);
+  }});
+
+  // Streamlit에서 메시지 수신 (지도 이동 명령 등)
+  window.addEventListener('message', function(evt) {{
+    if (evt.data && evt.data.type === 'moveMap') {{
+      var lat = evt.data.lat, lng = evt.data.lng;
+      if (map) {{
+        map.setCenter(new kakao.maps.LatLng(lat, lng));
+        map.setLevel(3);
+        placeMark(lat, lng);
+      }}
+    }}
+    // 로딩 완료 신호
+    if (evt.data && evt.data.type === 'doneLoading') {{
+      document.getElementById('loading').style.display = 'none';
+    }}
   }});
 }});
 
@@ -236,18 +279,35 @@ function placeMark(lat, lng) {{
   circle.setMap(map);
   var pt = map.getProjection().pointFromCoords(pos);
   var p = document.createElement('div');
-  p.className='cp'; p.style.left=pt.x+'px'; p.style.top=pt.y+'px';
+  p.className = 'cp';
+  p.style.left = pt.x + 'px';
+  p.style.top  = pt.y + 'px';
   document.getElementById('map').appendChild(p);
-  setTimeout(function(){{p.remove();}}, 700);
+  setTimeout(function(){{ p.remove(); }}, 700);
 }}
 </script>
 </body>
-</html>"""
-    components.html(map_html, height=780, scrolling=False)
+</html>
+"""
 
-# ══════════════════════════════════════════════════
-# 좌측: 정보 패널
-# ══════════════════════════════════════════════════
+# ── 레이아웃 ──────────────────────────────────────
+col_left, col_right = st.columns([10, 17], gap="small")
+
+with col_right:
+    # ★ components.html()의 반환값으로 클릭 데이터 수신
+    map_click = components.html(MAP_HTML, height=780, scrolling=False)
+
+    # 클릭 데이터 처리
+    if map_click and isinstance(map_click, dict):
+        if map_click.get("action") == "click":
+            lat = map_click.get("lat")
+            lng = map_click.get("lng")
+            if lat and lng:
+                if lat != st.session_state.last_lat or lng != st.session_state.last_lng:
+                    with st.spinner("건축물대장 조회 중..."):
+                        process_click(lat, lng)
+                    st.rerun()
+
 with col_left:
     # 헤더
     st.markdown("""
@@ -278,28 +338,18 @@ with col_left:
                     road = doc.get("road_address")
                     main = road["address_name"] if road else doc["address_name"]
                     sub  = doc["address_name"] if road else ""
-                    btn_label = f"📍 {main}" + (f"\n↳ {sub}" if sub else "")
-                    if st.button(btn_label, key=f"r_{doc['address_name']}", use_container_width=True):
+                    label = f"📍 {main}" + (f"\n↳ {sub}" if sub else "")
+                    if st.button(label, key=f"r_{doc['address_name']}", use_container_width=True):
                         lat = float(doc["y"]); lng = float(doc["x"])
                         with st.spinner("조회 중..."):
-                            addr_doc = coord2addr(lat, lng)
-                        land = addr_doc.get("address") or {}
-                        road2= addr_doc.get("road_address") or {}
-                        display_addr = road2.get("address_name") or land.get("address_name") or main
-                        bc = land.get("b_code","")
-                        st.session_state.current_addr = display_addr
-                        with st.spinner("건축물대장 조회 중..."):
-                            st.session_state.building_data = fetch_building(
-                                bc[:5], bc[5:10] if len(bc)>=10 else "",
-                                land.get("main_address_no","0"),
-                                land.get("sub_address_no","0"))
+                            process_click(lat, lng)
                         st.rerun()
             else:
                 st.warning("검색 결과가 없습니다.")
 
     st.divider()
 
-    # 수동 PNU
+    # 수동 PNU 입력
     with st.expander("⚙️ 수동 PNU 코드 입력"):
         sg = st.text_input("시군구코드(5자리)", max_chars=5, placeholder="11680", key="psg")
         bd = st.text_input("법정동코드(5자리)", max_chars=5, placeholder="10300", key="pbd")
@@ -317,7 +367,7 @@ with col_left:
 
     st.divider()
 
-    # ── 건축물 정보 표시 ─────────────────────────────
+    # ── 결과 표시 ─────────────────────────────────
     def fa(v):
         try: return f"{float(v):,.2f} ㎡"
         except: return v or "-"
@@ -326,27 +376,24 @@ with col_left:
             return f"{v[:4]}.{v[4:6]}.{v[6:]}"
         return v or "-"
 
+    def render_cell(label, value, highlight=False):
+        color = "#38bdf8" if highlight else "#c9d1d9"
+        return f"""<div style="background:#07090f;border:1px solid rgba(255,255,255,.04);
+          border-radius:5px;padding:7px;">
+          <div style="font-size:.55rem;font-weight:600;color:#484f58;text-transform:uppercase;
+            letter-spacing:.05em;margin-bottom:2px;">{label}</div>
+          <div style="font-size:.73rem;color:{color};font-family:monospace;">{value}</div>
+        </div>"""
+
     if st.session_state.building_data is None:
         st.markdown("""
 <div style="background:#161b22;border:1px dashed rgba(56,189,248,.15);border-radius:10px;
-  padding:24px 14px;text-align:center;margin-top:8px;">
+  padding:24px 14px;text-align:center;">
   <div style="font-size:1.8rem;margin-bottom:8px;">🗺️</div>
   <div style="font-size:.8rem;font-weight:600;color:#c9d1d9;margin-bottom:5px;">지도를 클릭하세요</div>
   <div style="font-size:.7rem;color:#484f58;line-height:1.7;">
     지도의 원하는 위치를 클릭하면<br>
     <strong style="color:#38bdf8;">건축물대장 정보</strong>가 표시됩니다.
-  </div>
-  <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;padding-top:12px;
-    border-top:1px solid rgba(255,255,255,.07);justify-content:center;">
-    <span style="display:flex;align-items:center;gap:3px;font-size:.62rem;color:#484f58;">
-      <span style="width:7px;height:7px;background:#38bdf8;border-radius:2px;display:inline-block;"></span>일반지도
-    </span>
-    <span style="display:flex;align-items:center;gap:3px;font-size:.62rem;color:#484f58;">
-      <span style="width:7px;height:7px;background:#f59e0b;border-radius:2px;display:inline-block;"></span>위성지도
-    </span>
-    <span style="display:flex;align-items:center;gap:3px;font-size:.62rem;color:#484f58;">
-      <span style="width:7px;height:7px;background:#10b981;border-radius:2px;display:inline-block;"></span>지적도
-    </span>
   </div>
 </div>""", unsafe_allow_html=True)
 
@@ -355,7 +402,7 @@ with col_left:
         addr    = st.session_state.current_addr
 
         if "error" in bd_data:
-            st.error(f"오류: {bd_data['error']}")
+            st.error(f"조회 오류: {bd_data['error']}")
         else:
             basis_items = bd_data.get("basis", {}).get("items", [])
             title_items = bd_data.get("title", {}).get("items", [])
@@ -373,13 +420,23 @@ with col_left:
                     grnd_fl = item.get("grndFlCnt") or "-"
                     undr_fl = item.get("undgrndFlCnt") or "0"
 
+                    cells = "".join([
+                        render_cell("연면적",    fa(item.get("totArea")),   True),
+                        render_cell("건축면적",  fa(item.get("archArea"))),
+                        render_cell("대지면적",  fa(item.get("platArea"))),
+                        render_cell("건폐율/용적률",
+                            f"{item.get('bcRat') or '-'}% / {item.get('vlRat') or '-'}%"),
+                        render_cell("허가일",    fd(item.get("pmsDay"))),
+                        render_cell("사용승인일",fd(item.get("useAprDay"))),
+                    ])
+
                     st.markdown(f"""
 <div style="background:#161b22;border:1px solid rgba(56,189,248,.15);border-radius:10px;
   padding:13px;margin-bottom:10px;">
   <div style="display:flex;align-items:center;gap:8px;margin-bottom:9px;">
     <div style="width:30px;height:30px;background:linear-gradient(135deg,rgba(56,189,248,.15),rgba(16,185,129,.15));
       border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:13px;
-      border:1px solid rgba(56,189,248,.15);">🏢</div>
+      border:1px solid rgba(56,189,248,.15);flex-shrink:0;">🏢</div>
     <div>
       <div style="font-size:.82rem;font-weight:700;color:#f0f6ff;">{bld_nm}</div>
       <div style="font-size:.65rem;color:#484f58;">{addr}</div>
@@ -392,67 +449,33 @@ with col_left:
       font-size:.6rem;font-weight:600;padding:2px 6px;border-radius:4px;">{strct}</span>
     <span style="background:rgba(245,158,11,.12);color:#f59e0b;border:1px solid rgba(245,158,11,.2);
       font-size:.6rem;font-weight:600;padding:2px 6px;border-radius:4px;">
-      지상 {grnd_fl}층/지하 {undr_fl}층</span>
+      지상 {grnd_fl}층 / 지하 {undr_fl}층</span>
   </div>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
-    <div style="background:#07090f;border:1px solid rgba(255,255,255,.04);border-radius:5px;padding:7px;">
-      <div style="font-size:.55rem;font-weight:600;color:#484f58;text-transform:uppercase;margin-bottom:2px;">연면적</div>
-      <div style="font-size:.73rem;color:#38bdf8;font-family:monospace;">{fa(item.get("totArea"))}</div>
-    </div>
-    <div style="background:#07090f;border:1px solid rgba(255,255,255,.04);border-radius:5px;padding:7px;">
-      <div style="font-size:.55rem;font-weight:600;color:#484f58;text-transform:uppercase;margin-bottom:2px;">건축면적</div>
-      <div style="font-size:.73rem;color:#c9d1d9;font-family:monospace;">{fa(item.get("archArea"))}</div>
-    </div>
-    <div style="background:#07090f;border:1px solid rgba(255,255,255,.04);border-radius:5px;padding:7px;">
-      <div style="font-size:.55rem;font-weight:600;color:#484f58;text-transform:uppercase;margin-bottom:2px;">대지면적</div>
-      <div style="font-size:.73rem;color:#c9d1d9;font-family:monospace;">{fa(item.get("platArea"))}</div>
-    </div>
-    <div style="background:#07090f;border:1px solid rgba(255,255,255,.04);border-radius:5px;padding:7px;">
-      <div style="font-size:.55rem;font-weight:600;color:#484f58;text-transform:uppercase;margin-bottom:2px;">건폐율/용적률</div>
-      <div style="font-size:.73rem;color:#c9d1d9;font-family:monospace;">{item.get("bcRat") or "-"}%/{item.get("vlRat") or "-"}%</div>
-    </div>
-    <div style="background:#07090f;border:1px solid rgba(255,255,255,.04);border-radius:5px;padding:7px;">
-      <div style="font-size:.55rem;font-weight:600;color:#484f58;text-transform:uppercase;margin-bottom:2px;">허가일</div>
-      <div style="font-size:.73rem;color:#c9d1d9;font-family:monospace;">{fd(item.get("pmsDay"))}</div>
-    </div>
-    <div style="background:#07090f;border:1px solid rgba(255,255,255,.04);border-radius:5px;padding:7px;">
-      <div style="font-size:.55rem;font-weight:600;color:#484f58;text-transform:uppercase;margin-bottom:2px;">사용승인일</div>
-      <div style="font-size:.73rem;color:#c9d1d9;font-family:monospace;">{fd(item.get("useAprDay"))}</div>
-    </div>
-  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">{cells}</div>
 </div>""", unsafe_allow_html=True)
 
                 if title_items:
                     st.markdown('<p style="font-size:.6rem;font-weight:700;color:#38bdf8;letter-spacing:.1em;text-transform:uppercase;margin:6px 0 5px;">표제부 상세</p>', unsafe_allow_html=True)
                     for t in title_items[:3]:
+                        t_cells = "".join([
+                            render_cell("세대수",   f"{t.get('hhldCnt') or '-'} 세대"),
+                            render_cell("가구수",   f"{t.get('fmlyCnt') or '-'} 가구"),
+                            render_cell("승강기(일반/비상)",
+                                f"{t.get('elvtCnt') or '-'} / {t.get('emgenElevCnt') or '-'}"),
+                            render_cell("자주식 주차", f"{t.get('indrAutoUtcnt') or '-'} 대"),
+                        ])
                         st.markdown(f"""
-<div style="background:#161b22;border:1px solid rgba(16,185,129,.15);border-radius:10px;padding:11px;margin-bottom:7px;">
+<div style="background:#161b22;border:1px solid rgba(16,185,129,.15);border-radius:10px;
+  padding:11px;margin-bottom:7px;">
   <div style="font-size:.78rem;font-weight:700;color:#f0f6ff;margin-bottom:7px;">
     📦 {t.get("dongNm") or "주동"} — {t.get("mainPurpsCdNm") or "-"}
   </div>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
-    <div style="background:#07090f;border:1px solid rgba(255,255,255,.04);border-radius:5px;padding:6px;">
-      <div style="font-size:.55rem;font-weight:600;color:#484f58;text-transform:uppercase;margin-bottom:1px;">세대수</div>
-      <div style="font-size:.72rem;color:#c9d1d9;font-family:monospace;">{t.get("hhldCnt") or "-"} 세대</div>
-    </div>
-    <div style="background:#07090f;border:1px solid rgba(255,255,255,.04);border-radius:5px;padding:6px;">
-      <div style="font-size:.55rem;font-weight:600;color:#484f58;text-transform:uppercase;margin-bottom:1px;">가구수</div>
-      <div style="font-size:.72rem;color:#c9d1d9;font-family:monospace;">{t.get("fmlyCnt") or "-"} 가구</div>
-    </div>
-    <div style="background:#07090f;border:1px solid rgba(255,255,255,.04);border-radius:5px;padding:6px;">
-      <div style="font-size:.55rem;font-weight:600;color:#484f58;text-transform:uppercase;margin-bottom:1px;">승강기(일반/비상)</div>
-      <div style="font-size:.72rem;color:#c9d1d9;font-family:monospace;">{t.get("elvtCnt") or "-"}/{t.get("emgenElevCnt") or "-"}</div>
-    </div>
-    <div style="background:#07090f;border:1px solid rgba(255,255,255,.04);border-radius:5px;padding:6px;">
-      <div style="font-size:.55rem;font-weight:600;color:#484f58;text-transform:uppercase;margin-bottom:1px;">자주식 주차</div>
-      <div style="font-size:.72rem;color:#c9d1d9;font-family:monospace;">{t.get("indrAutoUtcnt") or "-"} 대</div>
-    </div>
-  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">{t_cells}</div>
 </div>""", unsafe_allow_html=True)
 
-        if st.button("↺ 초기화", use_container_width=True):
+        if st.button("↺ 초기화", use_container_width=True, key="reset_btn"):
             st.session_state.building_data = None
-            st.session_state.current_addr = ""
-            st.session_state.last_lat = None
-            st.session_state.last_lng = None
+            st.session_state.current_addr  = ""
+            st.session_state.last_lat      = None
+            st.session_state.last_lng      = None
             st.rerun()
