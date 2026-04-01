@@ -24,14 +24,13 @@ section[data-testid="stSidebar"]{display:none;}
 [data-testid="stToolbar"]{display:none;}
 .stApp{background:#07090f!important;}
 iframe{border:none!important;}
-[data-testid="stHorizontalBlock"]{gap:0!important;}
-[data-testid="column"]{padding:0!important;}
 </style>""", unsafe_allow_html=True)
 
 # ── 세션 상태 ─────────────────────────────────────
 for k, v in {
-    "last_lat": None, "last_lng": None,
-    "building_data": None, "current_addr": "",
+    "building_data": None,
+    "current_addr":  "",
+    "pnu": {},
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -40,12 +39,17 @@ for k, v in {
 def fetch_building(sigungu, bjdong, bun, ji):
     def mk_url(ep):
         qs = "&".join([
-            f"sigunguCd={sigungu}", f"bjdongCd={bjdong}", "platGbCd=0",
-            f"bun={str(bun).zfill(4)}", f"ji={str(ji or 0).zfill(4)}",
-            "startDate=", "endDate=", "numOfRows=10", "pageNo=1",
+            f"sigunguCd={sigungu}",
+            f"bjdongCd={bjdong}",
+            "platGbCd=0",
+            f"bun={str(bun).zfill(4)}",
+            f"ji={str(ji or 0).zfill(4)}",
+            "startDate=", "endDate=",
+            "numOfRows=10", "pageNo=1",
             f"serviceKey={BUILDING_API_KEY}",
         ])
         return f"http://apis.data.go.kr/1613000/BldRgstService_v2/{ep}?{qs}"
+
     def parse(txt):
         try:
             root = ET.fromstring(txt)
@@ -53,27 +57,17 @@ def fetch_building(sigungu, bjdong, bun, ji):
             if code is not None and code.text != "00":
                 msg = root.find(".//resultMsg")
                 return {"error": msg.text if msg else "API 오류"}
-            return {"items": [{c.tag:(c.text or "") for c in i}
+            return {"items": [{c.tag: (c.text or "") for c in i}
                                for i in root.findall(".//item")]}
         except Exception as e:
             return {"error": str(e)}
+
     try:
         r1 = requests.get(mk_url("getBrBasisOulnInfo"), timeout=10)
         r2 = requests.get(mk_url("getBrTitleInfo"),     timeout=10)
         return {"basis": parse(r1.text), "title": parse(r2.text)}
     except Exception as e:
         return {"error": str(e)}
-
-def coord2addr(lat, lng):
-    try:
-        r = requests.get(
-            "https://dapi.kakao.com/v2/local/geo/coord2address.json",
-            headers={"Authorization": f"KakaoAK {KAKAO_REST_KEY}"},
-            params={"x": lng, "y": lat}, timeout=5)
-        docs = r.json().get("documents", [])
-        return docs[0] if docs else {}
-    except:
-        return {}
 
 def addr_search(query):
     try:
@@ -85,115 +79,416 @@ def addr_search(query):
     except:
         return []
 
-def process_click(lat, lng):
-    """좌표 클릭 처리: 역지오코딩 → 건축물대장 조회"""
-    addr_doc = coord2addr(lat, lng)
-    land = addr_doc.get("address") or {}
-    road = addr_doc.get("road_address") or {}
-    display_addr = road.get("address_name") or land.get("address_name") or f"{lat:.5f},{lng:.5f}"
-    bc = land.get("b_code", "")
-    st.session_state.current_addr = display_addr
-    st.session_state.building_data = fetch_building(
-        bc[:5], bc[5:10] if len(bc) >= 10 else "",
-        land.get("main_address_no", "0"),
-        land.get("sub_address_no", "0")
-    )
-    st.session_state.last_lat = lat
-    st.session_state.last_lng = lng
+# ══════════════════════════════════════════════════
+# query_params 수신
+# 지도 JS → Streamlit URL (?action=...) → Python 처리
+# ★ allow-top-navigation-by-user-activation 없이도
+#   Streamlit이 직접 URL을 바꾸는 게 아니라
+#   JS에서 history.replaceState로 같은 origin 내
+#   파라미터만 바꾸는 방식 사용
+# ══════════════════════════════════════════════════
+qp = st.query_params
+action = qp.get("action", "")
+
+if action == "query":
+    # 지도가 이미 역지오코딩 완료 후 PNU 코드를 넘겨준 경우
+    sigungu = qp.get("sigungu", "")
+    bjdong  = qp.get("bjdong",  "")
+    bun     = qp.get("bun",     "0")
+    ji      = qp.get("ji",      "0")
+    addr    = qp.get("addr",    "")
+
+    if sigungu and bjdong:
+        result = fetch_building(sigungu, bjdong, bun, ji)
+        st.session_state.building_data = result
+        st.session_state.current_addr  = addr
+        st.session_state.pnu = {
+            "sigungu": sigungu, "bjdong": bjdong, "bun": bun, "ji": ji
+        }
+    st.query_params.clear()
+    st.rerun()
 
 # ══════════════════════════════════════════════════
-# 지도 HTML — Streamlit.setComponentValue() 방식
-# ★ iframe sandbox 안에서 parent로 데이터 보내는
-#   Streamlit 공식 양방향 통신 채널 사용
+# 전체 UI를 하나의 HTML 컴포넌트로
+# 카카오맵 + 좌측 패널 모두 HTML 안에 구현
+# Python은 건축물대장 API 조회 전용으로만 사용
 # ══════════════════════════════════════════════════
-MAP_HTML = f"""
-<!DOCTYPE html>
+
+# 현재 건물 데이터를 JSON으로 HTML에 주입
+bld_json = json.dumps(st.session_state.building_data or {}, ensure_ascii=False)
+addr_str  = st.session_state.current_addr.replace('"', '&quot;')
+
+def fa(v):
+    try: return f"{float(v):,.2f} ㎡"
+    except: return v or "-"
+
+def fd(v):
+    if v and len(v) == 8:
+        return f"{v[:4]}.{v[4:6]}.{v[6:]}"
+    return v or "-"
+
+# 건물 정보 HTML 미리 생성 (Python에서 렌더링)
+def render_building_html(bd, addr):
+    if not bd:
+        return """
+<div class="guide-box">
+  <div class="gi">🗺️</div>
+  <div class="gt">지도를 클릭하세요</div>
+  <div class="gd">원하는 위치를 클릭하면<br><strong>건축물대장 정보</strong>가 표시됩니다.</div>
+  <div class="legend">
+    <span class="leg-item"><span class="leg-dot" style="background:#38bdf8"></span>일반지도</span>
+    <span class="leg-item"><span class="leg-dot" style="background:#f59e0b"></span>위성지도</span>
+    <span class="leg-item"><span class="leg-dot" style="background:#10b981"></span>지적도</span>
+  </div>
+</div>"""
+
+    if "error" in bd:
+        return f'<div class="err-box">⚠️ {bd["error"]}</div>'
+
+    basis = bd.get("basis", {}).get("items", [])
+    title = bd.get("title", {}).get("items", [])
+
+    if not basis and not title:
+        return '<div class="err-box">⚠️ 건축물 정보가 없습니다.</div>'
+
+    html = f'<div class="addr-bar">📍 {addr}</div>'
+
+    for item in basis:
+        bld_nm  = item.get("bldNm") or "건물명 미등록"
+        use_nm  = item.get("mainPurpsCdNm") or item.get("mainPurpsCd") or "-"
+        strct   = item.get("strctCdNm") or item.get("strctCd") or "-"
+        grnd_fl = item.get("grndFlCnt") or "-"
+        undr_fl = item.get("undgrndFlCnt") or "0"
+        html += f"""
+<div class="bcard">
+  <div class="bhead">
+    <div class="bico">🏢</div>
+    <div>
+      <div class="bnm">{bld_nm}</div>
+      <div class="badr">{addr}</div>
+    </div>
+  </div>
+  <div class="tags">
+    <span class="tag tb">{use_nm}</span>
+    <span class="tag tg">{strct}</span>
+    <span class="tag ta">지상{grnd_fl}층/지하{undr_fl}층</span>
+  </div>
+  <div class="grid2">
+    <div class="cell"><div class="clbl">연면적</div><div class="cval hi">{fa(item.get("totArea"))}</div></div>
+    <div class="cell"><div class="clbl">건축면적</div><div class="cval">{fa(item.get("archArea"))}</div></div>
+    <div class="cell"><div class="clbl">대지면적</div><div class="cval">{fa(item.get("platArea"))}</div></div>
+    <div class="cell"><div class="clbl">건폐율/용적률</div><div class="cval">{item.get("bcRat") or "-"}%/{item.get("vlRat") or "-"}%</div></div>
+    <div class="cell"><div class="clbl">허가일</div><div class="cval">{fd(item.get("pmsDay"))}</div></div>
+    <div class="cell"><div class="clbl">사용승인일</div><div class="cval">{fd(item.get("useAprDay"))}</div></div>
+  </div>
+</div>"""
+
+    if title:
+        html += '<div class="sec-title">표제부 상세</div>'
+        for t in title[:3]:
+            html += f"""
+<div class="bcard" style="border-color:rgba(16,185,129,.2)">
+  <div class="bhead">
+    <div class="bico" style="background:linear-gradient(135deg,rgba(16,185,129,.15),rgba(56,189,248,.1))">📦</div>
+    <div>
+      <div class="bnm">{t.get("dongNm") or "주동"}</div>
+      <div class="badr">{t.get("mainPurpsCdNm") or "-"}</div>
+    </div>
+  </div>
+  <div class="grid2">
+    <div class="cell"><div class="clbl">세대수</div><div class="cval">{t.get("hhldCnt") or "-"} 세대</div></div>
+    <div class="cell"><div class="clbl">가구수</div><div class="cval">{t.get("fmlyCnt") or "-"} 가구</div></div>
+    <div class="cell"><div class="clbl">승강기(일반/비상)</div><div class="cval">{t.get("elvtCnt") or "-"}/{t.get("emgenElevCnt") or "-"}</div></div>
+    <div class="cell"><div class="clbl">자주식주차</div><div class="cval">{t.get("indrAutoUtcnt") or "-"} 대</div></div>
+  </div>
+</div>"""
+    return html
+
+bld_html = render_building_html(
+    st.session_state.building_data,
+    st.session_state.current_addr
+)
+
+FULL_HTML = f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
 <script src="//dapi.kakao.com/v2/maps/sdk.js?appkey={KAKAO_JS_KEY}&libraries=services"></script>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-*{{box-sizing:border-box;margin:0;padding:0;}}
-:root{{--ac:#38bdf8;--gr:#10b981;--am:#f59e0b;--t2:#8b949e;--t3:#484f58;
-  --bd:rgba(255,255,255,.07);--bd2:rgba(56,189,248,.22);}}
-html,body{{height:100%;overflow:hidden;background:#07090f;font-family:'Noto Sans KR',-apple-system,sans-serif;}}
-#map{{width:100%;height:100vh;}}
+*,*::before,*::after{{box-sizing:border-box;margin:0;padding:0;}}
+:root{{
+  --bg:#07090f;--bg2:#0d1117;--bg3:#161b22;
+  --bd:rgba(255,255,255,.07);--bd2:rgba(56,189,248,.22);
+  --t:#c9d1d9;--t2:#8b949e;--t3:#484f58;
+  --ac:#38bdf8;--a2:#0ea5e9;--gr:#10b981;--am:#f59e0b;
+  --pw:350px;--hh:50px;
+}}
+html,body{{height:100%;overflow:hidden;background:var(--bg);color:var(--t);
+  font-family:'Noto Sans KR',-apple-system,sans-serif;}}
+
+/* 헤더 */
+#hdr{{height:var(--hh);background:var(--bg2);border-bottom:1px solid var(--bd);
+  display:flex;align-items:center;padding:0 16px;gap:10px;position:relative;z-index:200;}}
+.hlogo{{width:28px;height:28px;background:linear-gradient(135deg,var(--ac),var(--gr));
+  border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:14px;}}
+.htit{{font-size:.85rem;font-weight:700;color:#f0f6ff;letter-spacing:-.02em;}}
+.hsub{{font-size:.56rem;color:var(--t3);font-family:'JetBrains Mono',monospace;}}
+.hbdg{{margin-left:auto;display:flex;align-items:center;gap:5px;
+  background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.25);
+  color:var(--gr);padding:2px 9px;border-radius:20px;font-size:.6rem;font-weight:600;}}
+.hdot{{width:5px;height:5px;border-radius:50%;background:var(--gr);animation:blink 2s infinite;}}
+@keyframes blink{{0%,100%{{opacity:1;}}50%{{opacity:.3;}}}}
+
+/* 레이아웃 */
+#main{{display:flex;height:calc(100vh - var(--hh));overflow:hidden;}}
+
+/* 패널 */
+#panel{{width:var(--pw);min-width:var(--pw);background:var(--bg2);
+  border-right:1px solid var(--bd);display:flex;flex-direction:column;overflow:hidden;}}
+#ps{{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:9px;}}
+#ps::-webkit-scrollbar{{width:3px;}}
+#ps::-webkit-scrollbar-thumb{{background:var(--bd2);border-radius:2px;}}
+
+.slbl{{font-size:.58rem;font-weight:700;letter-spacing:.1em;color:var(--ac);
+  text-transform:uppercase;margin-bottom:6px;display:flex;align-items:center;gap:5px;}}
+.slbl::before{{content:'';width:3px;height:10px;background:var(--ac);border-radius:2px;}}
+
+.sw{{background:var(--bg3);border:1px solid var(--bd);border-radius:9px;padding:11px;}}
+.srow{{display:flex;gap:5px;}}
+#si{{flex:1;background:var(--bg);border:1px solid var(--bd);border-radius:6px;
+  color:var(--t);font-family:inherit;font-size:.79rem;padding:7px 10px;outline:none;
+  transition:border-color .2s,box-shadow .2s;}}
+#si::placeholder{{color:var(--t3);}}
+#si:focus{{border-color:var(--ac);box-shadow:0 0 0 3px rgba(56,189,248,.1);}}
+.btn{{background:linear-gradient(135deg,var(--a2),var(--gr));color:#fff;border:none;
+  border-radius:6px;font-family:inherit;font-size:.72rem;font-weight:600;padding:7px 11px;
+  cursor:pointer;transition:all .2s;white-space:nowrap;}}
+.btn:hover{{opacity:.85;transform:translateY(-1px);}}
+.btng{{background:var(--bg);border:1px solid var(--bd);color:var(--t2);}}
+.btng:hover{{border-color:var(--bd2);color:var(--t);opacity:1;}}
+
+#sres{{margin-top:6px;display:none;flex-direction:column;gap:3px;}}
+.ri{{background:var(--bg);border:1px solid var(--bd);border-radius:5px;
+  padding:7px 10px;cursor:pointer;font-size:.74rem;color:var(--t2);transition:all .15s;}}
+.ri:hover{{border-color:var(--bd2);color:var(--t);background:rgba(56,189,248,.05);}}
+.ri .rm{{font-weight:500;color:var(--t);}}
+.ri .rs{{font-size:.66rem;color:var(--t3);margin-top:1px;}}
+
+/* 상태 배너 */
+#status-bar{{background:rgba(56,189,248,.07);border:1px solid rgba(56,189,248,.15);
+  border-radius:8px;padding:9px 12px;font-size:.72rem;color:var(--ac);
+  display:flex;align-items:center;gap:8px;}}
+#status-bar.loading{{color:var(--am);background:rgba(245,158,11,.07);border-color:rgba(245,158,11,.2);}}
+#status-bar.done{{color:var(--gr);background:rgba(16,185,129,.07);border-color:rgba(16,185,129,.2);}}
+#status-bar.err{{color:#f87171;background:rgba(239,68,68,.07);border-color:rgba(239,68,68,.2);}}
+.spin{{width:12px;height:12px;border:2px solid rgba(245,158,11,.2);
+  border-top-color:var(--am);border-radius:50%;animation:spin .7s linear infinite;flex-shrink:0;}}
+@keyframes spin{{to{{transform:rotate(360deg);}}}}
+
+/* 건물 카드 */
+.guide-box{{background:var(--bg3);border:1px dashed rgba(56,189,248,.15);
+  border-radius:9px;padding:22px 13px;text-align:center;}}
+.gi{{font-size:1.7rem;margin-bottom:7px;}}
+.gt{{font-size:.78rem;font-weight:600;color:var(--t);margin-bottom:5px;}}
+.gd{{font-size:.7rem;color:var(--t3);line-height:1.7;}}
+.gd strong{{color:var(--ac);}}
+.legend{{display:flex;justify-content:center;gap:10px;margin-top:10px;padding-top:10px;border-top:1px solid var(--bd);}}
+.leg-item{{display:flex;align-items:center;gap:4px;font-size:.62rem;color:var(--t3);}}
+.leg-dot{{width:7px;height:7px;border-radius:2px;display:inline-block;}}
+
+.addr-bar{{font-size:.7rem;color:var(--t3);padding:6px 10px;
+  background:var(--bg3);border-radius:6px;margin-bottom:8px;}}
+.bcard{{background:var(--bg3);border:1px solid rgba(56,189,248,.15);border-radius:9px;
+  padding:12px;margin-bottom:8px;}}
+.bhead{{display:flex;align-items:flex-start;gap:8px;margin-bottom:8px;}}
+.bico{{width:30px;height:30px;background:linear-gradient(135deg,rgba(56,189,248,.15),rgba(16,185,129,.15));
+  border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:13px;
+  flex-shrink:0;border:1px solid rgba(56,189,248,.15);}}
+.bnm{{font-size:.82rem;font-weight:700;color:#f0f6ff;}}
+.badr{{font-size:.65rem;color:var(--t3);margin-top:1px;}}
+.tags{{display:flex;flex-wrap:wrap;gap:3px;margin-bottom:8px;}}
+.tag{{font-size:.6rem;font-weight:600;padding:2px 6px;border-radius:4px;}}
+.tb{{background:rgba(56,189,248,.12);color:var(--ac);border:1px solid rgba(56,189,248,.2);}}
+.tg{{background:rgba(16,185,129,.12);color:var(--gr);border:1px solid rgba(16,185,129,.2);}}
+.ta{{background:rgba(245,158,11,.12);color:var(--am);border:1px solid rgba(245,158,11,.2);}}
+.grid2{{display:grid;grid-template-columns:1fr 1fr;gap:4px;}}
+.cell{{background:var(--bg);border:1px solid rgba(255,255,255,.04);border-radius:5px;padding:7px 8px;}}
+.clbl{{font-size:.55rem;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:2px;}}
+.cval{{font-size:.72rem;font-weight:500;color:var(--t);font-family:'JetBrains Mono',monospace;}}
+.cval.hi{{color:var(--ac);}}
+.sec-title{{font-size:.58rem;font-weight:700;color:var(--ac);text-transform:uppercase;
+  letter-spacing:.1em;margin:8px 0 5px;display:flex;align-items:center;gap:5px;}}
+.sec-title::before{{content:'';width:3px;height:10px;background:var(--ac);border-radius:2px;}}
+.err-box{{background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.2);
+  border-radius:9px;padding:12px;font-size:.73rem;color:#fca5a5;line-height:1.7;}}
+
+/* 지도 */
+#ma{{flex:1;position:relative;overflow:hidden;}}
+#map{{width:100%;height:100%;}}
 #lc{{position:absolute;top:12px;left:12px;z-index:400;display:flex;flex-direction:column;gap:4px;}}
 .lb{{background:rgba(7,9,15,.9);border:1px solid rgba(56,189,248,.2);color:var(--t2);
   border-radius:7px;font-size:.68rem;font-weight:600;padding:7px 10px;cursor:pointer;
   transition:all .2s;backdrop-filter:blur(12px);display:flex;align-items:center;gap:5px;
   font-family:inherit;border-style:solid;}}
-.lb:hover{{background:rgba(56,189,248,.12);border-color:rgba(56,189,248,.5);color:#c9d1d9;}}
+.lb:hover{{background:rgba(56,189,248,.12);border-color:rgba(56,189,248,.5);color:var(--t);}}
 .lb.on{{background:rgba(56,189,248,.18);border-color:var(--ac);color:var(--ac);}}
 #zc{{position:absolute;top:12px;right:12px;z-index:400;display:flex;flex-direction:column;gap:4px;}}
 .sq{{width:32px;height:32px;padding:0;justify-content:center;font-size:.9rem;}}
-#cb{{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);z-index:400;
+#cb{{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);z-index:400;
   background:rgba(7,9,15,.9);border:1px solid rgba(255,255,255,.1);border-radius:20px;
-  padding:5px 14px;font-family:monospace;font-size:.62rem;color:var(--t3);
-  backdrop-filter:blur(12px);pointer-events:none;white-space:nowrap;transition:color .3s;}}
-#ch{{position:absolute;bottom:50px;left:50%;transform:translateX(-50%);z-index:400;
-  background:rgba(7,9,15,.92);border:1px solid var(--bd2);border-radius:20px;
-  padding:5px 14px;font-size:.67rem;color:var(--ac);
-  backdrop-filter:blur(12px);pointer-events:none;}}
-#loading{{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:500;
-  background:rgba(7,9,15,.92);border:1px solid var(--bd2);border-radius:12px;
-  padding:14px 22px;font-size:.74rem;color:var(--ac);display:none;
-  backdrop-filter:blur(16px);align-items:center;gap:10px;}}
-.sp{{width:16px;height:16px;border:2px solid rgba(56,189,248,.2);
-  border-top-color:var(--ac);border-radius:50%;animation:spin .7s linear infinite;}}
-@keyframes spin{{to{{transform:rotate(360deg);}}}}
-@keyframes cp{{0%{{transform:translate(-50%,-50%) scale(.5);opacity:1;}}
-100%{{transform:translate(-50%,-50%) scale(3.5);opacity:0;}}}}
+  padding:4px 12px;font-family:'JetBrains Mono',monospace;font-size:.61rem;
+  color:var(--t3);backdrop-filter:blur(12px);pointer-events:none;white-space:nowrap;}}
+@keyframes cp{{
+  0%{{transform:translate(-50%,-50%) scale(.5);opacity:1;}}
+  100%{{transform:translate(-50%,-50%) scale(3.5);opacity:0;}}}}
 .cp{{position:absolute;width:24px;height:24px;border:2px solid var(--ac);border-radius:50%;
-  pointer-events:none;animation:cp .6s ease-out forwards;z-index:600;}}
+  pointer-events:none;animation:cp .6s ease-out forwards;z-index:500;}}
 </style>
 </head>
 <body>
-<div id="map"></div>
-<div id="lc">
-  <button class="lb on" id="b1" onclick="setT('road')">🗺 일반</button>
-  <button class="lb" id="b2" onclick="setT('sky')">🛰 위성</button>
-  <button class="lb" id="b3" onclick="toggleJ()">📐 지적도</button>
+
+<div id="hdr">
+  <div class="hlogo">🏢</div>
+  <div>
+    <div class="htit">건축물대장 조회 시스템</div>
+    <div class="hsub">KAKAO MAPS · VWORLD · BUILDING REGISTRY</div>
+  </div>
+  <div class="hbdg"><div class="hdot"></div> LIVE</div>
 </div>
-<div id="zc">
-  <button class="lb sq" onclick="map&&map.setLevel(map.getLevel()-1)">＋</button>
-  <button class="lb sq" onclick="map&&map.setLevel(map.getLevel()+1)">－</button>
+
+<div id="main">
+  <!-- 패널 -->
+  <div id="panel">
+    <div id="ps">
+
+      <!-- 검색 -->
+      <div class="sw">
+        <div class="slbl">주소 검색</div>
+        <div class="srow">
+          <input id="si" type="text" placeholder="예: 강남구 테헤란로 152" autocomplete="off">
+          <button class="btn" onclick="doSearch()">검색</button>
+          <button class="btn btng" onclick="resetAll()">↺</button>
+        </div>
+        <div id="sres"></div>
+      </div>
+
+      <!-- 상태 표시 -->
+      <div id="status-bar">
+        <span id="status-icon">📌</span>
+        <span id="status-txt">지도를 클릭하거나 주소를 검색하세요</span>
+      </div>
+
+      <!-- 건물 정보 -->
+      <div id="bld-info">
+        {bld_html}
+      </div>
+
+    </div>
+  </div>
+
+  <!-- 지도 -->
+  <div id="ma">
+    <div id="map"></div>
+    <div id="lc">
+      <button class="lb on" id="b1" onclick="setT('road')">🗺 일반</button>
+      <button class="lb" id="b2" onclick="setT('sky')">🛰 위성</button>
+      <button class="lb" id="b3" onclick="toggleJ()">📐 지적도</button>
+    </div>
+    <div id="zc">
+      <button class="lb sq" onclick="map&&map.setLevel(map.getLevel()-1)">＋</button>
+      <button class="lb sq" onclick="map&&map.setLevel(map.getLevel()+1)">－</button>
+    </div>
+    <div id="cb">지도를 클릭하면 건축물대장이 조회됩니다</div>
+  </div>
 </div>
-<div id="cb">지도를 클릭하면 건축물대장이 조회됩니다</div>
-<div id="ch">🖱 지도 클릭 → 즉시 조회</div>
-<div id="loading"><div class="sp"></div>조회 중...</div>
 
 <script>
-// ── Streamlit 양방향 통신 채널 ──────────────────
-// Streamlit이 iframe에 주입하는 공식 메시지 핸들러
-// setComponentValue()로 Python으로 데이터 전송
-function sendValue(data) {{
-  // Streamlit 내부 postMessage 프로토콜
-  window.parent.postMessage({{
-    isStreamlitMessage: true,
-    type: "streamlit:setComponentValue",
-    value: data,
-  }}, "*");
+// ── 상수 ──
+var KAKAO_REST = '{KAKAO_REST_KEY}';
+
+// ── 상태 표시 ──
+function setStatus(type, icon, msg) {{
+  var bar = document.getElementById('status-bar');
+  bar.className = 'status-bar ' + type;
+  document.getElementById('status-icon').textContent = icon;
+  document.getElementById('status-txt').textContent  = msg;
 }}
 
-// Streamlit 컴포넌트 준비 신호
-function setFrameHeight(h) {{
-  window.parent.postMessage({{
-    isStreamlitMessage: true,
-    type: "streamlit:setFrameHeight",
-    height: h,
-  }}, "*");
+// ── 카카오 REST API: 좌표→주소 (역지오코딩) ──
+// Python 서버를 거치지 않고 JS에서 직접 호출
+// 카카오 REST API는 HTTPS이므로 Mixed Content 없음
+async function coord2addr(lat, lng) {{
+  var url = 'https://dapi.kakao.com/v2/local/geo/coord2address.json?x='+lng+'&y='+lat;
+  var res  = await fetch(url, {{
+    headers: {{ 'Authorization': 'KakaoAK ' + KAKAO_REST }}
+  }});
+  var data = await res.json();
+  var docs = data.documents || [];
+  return docs.length ? docs[0] : null;
 }}
 
-// 컴포넌트 준비 완료 신호
-window.parent.postMessage({{
-  isStreamlitMessage: true,
-  type: "streamlit:componentReady",
-  apiVersion: 1,
-}}, "*");
+// ── PNU 코드 추출 ──
+// 카카오 coord2address 응답의 b_code(법정동코드 10자리)에서 추출
+function extractPNU(doc) {{
+  var land = doc.address || {{}};
+  var bCode = land.b_code || '';           // 10자리 법정동코드
+  // b_code 구조: 시군구코드(5) + 법정동코드(5)
+  var sigungu = bCode.slice(0, 5);
+  var bjdong  = bCode.slice(5, 10);
+  var bun     = land.main_address_no || '0';
+  var ji      = land.sub_address_no  || '0';
 
-// ── 카카오맵 ────────────────────────────────────
+  var road    = doc.road_address || {{}};
+  var addr    = road.address_name || land.address_name || '';
+
+  return {{ sigungu: sigungu, bjdong: bjdong, bun: bun, ji: ji, addr: addr, bCode: bCode }};
+}}
+
+// ── Streamlit URL 파라미터로 건축물대장 조회 요청 ──
+// history.pushState는 sandbox에서 허용됨 (same-origin 내)
+// 단, Streamlit iframe은 about:srcdoc → pushState 불가
+// → 대신 Streamlit의 st.query_params를 활용하기 위해
+//   현재 Streamlit 앱 URL을 직접 변경
+// ★ 해결책: 직접 fetch로 Streamlit 앱에 GET 요청
+//   Streamlit이 action=query를 받아서 처리 후 rerun
+async function queryBuilding(pnu) {{
+  setStatus('loading', '⏳', '건축물대장 조회 중... (' + pnu.addr + ')');
+  document.getElementById('bld-info').innerHTML =
+    '<div style="text-align:center;padding:30px;color:var(--t3);">' +
+    '<div class="spin" style="width:24px;height:24px;margin:0 auto 10px;border-width:3px;' +
+    'border-color:rgba(56,189,248,.15);border-top-color:var(--ac);"></div>' +
+    '<div style="font-size:.73rem;">건축물대장 조회 중...</div></div>';
+
+  var params = new URLSearchParams({{
+    action:  'query',
+    sigungu: pnu.sigungu,
+    bjdong:  pnu.bjdong,
+    bun:     pnu.bun,
+    ji:      pnu.ji,
+    addr:    pnu.addr,
+  }});
+
+  // Streamlit 앱 URL에 파라미터를 붙여서 이동
+  // → Streamlit이 query_params를 읽고 처리 후 rerun
+  // ★ 핵심: top-level window URL 변경 (iframe 자신이 아닌 parent)
+  //   sandbox="allow-top-navigation-by-user-activation" 필요
+  //   → Streamlit은 이 권한을 허용함
+  try {{
+    window.top.location.href = window.top.location.href.split('?')[0] + '?' + params.toString();
+  }} catch(e) {{
+    // fallback: location.replace
+    try {{
+      window.location.href = '?' + params.toString();
+    }} catch(e2) {{
+      setStatus('err', '❌', '페이지 이동 실패. 수동 PNU 입력을 사용해 주세요.');
+    }}
+  }}
+}}
+
+// ── 카카오맵 초기화 ──
 var map, marker, circle, jijeokOn = false;
 
 kakao.maps.load(function() {{
@@ -202,9 +497,6 @@ kakao.maps.load(function() {{
     level: 4,
   }});
 
-  setFrameHeight(document.body.scrollHeight);
-
-  // VWorld 지적도
   kakao.maps.Tileset.add('VW_LP', new kakao.maps.Tileset({{
     width:256, height:256, minZoom:1, maxZoom:21,
     getTileUrl: function(x,y,z) {{
@@ -212,42 +504,52 @@ kakao.maps.load(function() {{
     }},
   }}));
 
-  // 지도 클릭 → Streamlit으로 좌표 전송
-  kakao.maps.event.addListener(map, 'click', function(e) {{
+  // ── 지도 클릭 이벤트 ──
+  kakao.maps.event.addListener(map, 'click', async function(e) {{
     var lat = e.latLng.getLat(), lng = e.latLng.getLng();
-    
+
     document.getElementById('cb').textContent =
-      'LAT '+lat.toFixed(6)+'  ·  LNG '+lng.toFixed(6);
-    document.getElementById('ch').style.display = 'none';
-    document.getElementById('loading').style.display = 'flex';
-    
+      'LAT ' + lat.toFixed(6) + '  ·  LNG ' + lng.toFixed(6);
+
     placeMark(lat, lng);
     map.panTo(e.latLng);
-    
-    // Python으로 좌표 전송
-    sendValue({{action: 'click', lat: lat, lng: lng}});
+    setStatus('loading', '⏳', '주소 변환 중...');
+
+    try {{
+      // STEP 1: 좌표 → 주소 + PNU 코드 (카카오 REST API)
+      var doc = await coord2addr(lat, lng);
+      if (!doc) {{
+        setStatus('err', '❌', '주소를 찾을 수 없습니다.');
+        return;
+      }}
+
+      var pnu = extractPNU(doc);
+      setStatus('loading', '⏳', '주소 확인: ' + pnu.addr);
+
+      // 개발자 확인용 콘솔 출력
+      console.log('[건축물대장] 좌표:', lat, lng);
+      console.log('[건축물대장] 주소:', pnu.addr);
+      console.log('[건축물대장] b_code:', pnu.bCode);
+      console.log('[건축물대장] 시군구:', pnu.sigungu, '법정동:', pnu.bjdong, '본번:', pnu.bun, '부번:', pnu.ji);
+
+      if (!pnu.sigungu || pnu.sigungu.length < 4) {{
+        setStatus('err', '❌', '지번 코드를 추출할 수 없습니다. 다른 위치를 클릭해 보세요.');
+        return;
+      }}
+
+      // STEP 2: PNU 코드로 건축물대장 조회 (Streamlit Python 경유)
+      await queryBuilding(pnu);
+
+    }} catch(err) {{
+      console.error('[건축물대장] 오류:', err);
+      setStatus('err', '❌', '오류: ' + err.message);
+    }}
   }});
 
   kakao.maps.event.addListener(map, 'mousemove', function(e) {{
     if (!marker)
       document.getElementById('cb').textContent =
-        'LAT '+e.latLng.getLat().toFixed(6)+'  ·  LNG '+e.latLng.getLng().toFixed(6);
-  }});
-
-  // Streamlit에서 메시지 수신 (지도 이동 명령 등)
-  window.addEventListener('message', function(evt) {{
-    if (evt.data && evt.data.type === 'moveMap') {{
-      var lat = evt.data.lat, lng = evt.data.lng;
-      if (map) {{
-        map.setCenter(new kakao.maps.LatLng(lat, lng));
-        map.setLevel(3);
-        placeMark(lat, lng);
-      }}
-    }}
-    // 로딩 완료 신호
-    if (evt.data && evt.data.type === 'doneLoading') {{
-      document.getElementById('loading').style.display = 'none';
-    }}
+        'LAT ' + e.latLng.getLat().toFixed(6) + '  ·  LNG ' + e.latLng.getLng().toFixed(6);
   }});
 }});
 
@@ -279,203 +581,90 @@ function placeMark(lat, lng) {{
   circle.setMap(map);
   var pt = map.getProjection().pointFromCoords(pos);
   var p = document.createElement('div');
-  p.className = 'cp';
-  p.style.left = pt.x + 'px';
-  p.style.top  = pt.y + 'px';
-  document.getElementById('map').appendChild(p);
+  p.className='cp'; p.style.left=pt.x+'px'; p.style.top=pt.y+'px';
+  document.getElementById('ma').appendChild(p);
   setTimeout(function(){{ p.remove(); }}, 700);
+}}
+
+// ── 주소 검색 ──
+document.getElementById('si').addEventListener('keydown', function(e) {{
+  if (e.key==='Enter') doSearch();
+}});
+
+async function doSearch() {{
+  var q = document.getElementById('si').value.trim();
+  if (!q) return;
+  setStatus('loading', '⏳', '주소 검색 중...');
+
+  try {{
+    var url = 'https://dapi.kakao.com/v2/local/search/address.json?query=' + encodeURIComponent(q) + '&size=5';
+    var res  = await fetch(url, {{headers: {{'Authorization': 'KakaoAK ' + KAKAO_REST}}}});
+    var data = await res.json();
+    var docs = data.documents || [];
+
+    if (!docs.length) {{
+      setStatus('', '📌', '검색 결과가 없습니다.');
+      return;
+    }}
+
+    var box = document.getElementById('sres');
+    box.innerHTML = docs.map(function(d, i) {{
+      var road = d.road_address;
+      var main = road ? road.address_name : d.address_name;
+      var sub  = road ? d.address_name : '';
+      return '<div class="ri" onclick="pickResult(' + i + ')">' +
+             '<div class="rm">📍 ' + main + '</div>' +
+             (sub ? '<div class="rs">' + sub + '</div>' : '') +
+             '</div>';
+    }}).join('');
+    box.style.display = 'flex';
+    box._docs = docs;
+    setStatus('', '📌', docs.length + '개 결과');
+
+  }} catch(err) {{
+    setStatus('err', '❌', '검색 오류: ' + err.message);
+  }}
+}}
+
+async function pickResult(i) {{
+  var doc = document.getElementById('sres')._docs[i];
+  var lat = parseFloat(doc.y), lng = parseFloat(doc.x);
+  document.getElementById('sres').style.display = 'none';
+
+  if (map) {{ map.setCenter(new kakao.maps.LatLng(lat, lng)); map.setLevel(3); }}
+  placeMark(lat, lng);
+  setStatus('loading', '⏳', '주소 변환 중...');
+
+  try {{
+    var addrDoc = await coord2addr(lat, lng);
+    if (!addrDoc) {{ addrDoc = {{ address: doc.address, road_address: doc.road_address }}; }}
+    var pnu = extractPNU(addrDoc);
+    if (!pnu.addr) pnu.addr = doc.address_name;
+
+    console.log('[검색결과] PNU:', pnu);
+    await queryBuilding(pnu);
+  }} catch(err) {{
+    setStatus('err', '❌', '오류: ' + err.message);
+  }}
+}}
+
+function resetAll() {{
+  if (marker) marker.setMap(null);
+  if (circle) circle.setMap(null);
+  marker = null; circle = null;
+  document.getElementById('si').value = '';
+  document.getElementById('sres').style.display = 'none';
+  document.getElementById('cb').textContent = '지도를 클릭하면 건축물대장이 조회됩니다';
+  setStatus('', '📌', '지도를 클릭하거나 주소를 검색하세요');
+  document.getElementById('bld-info').innerHTML = `
+    <div class="guide-box">
+      <div class="gi">🗺️</div>
+      <div class="gt">지도를 클릭하세요</div>
+      <div class="gd">원하는 위치를 클릭하면<br><strong>건축물대장 정보</strong>가 표시됩니다.</div>
+    </div>`;
 }}
 </script>
 </body>
-</html>
-"""
+</html>"""
 
-# ── 레이아웃 ──────────────────────────────────────
-col_left, col_right = st.columns([10, 17], gap="small")
-
-with col_right:
-    # ★ components.html()의 반환값으로 클릭 데이터 수신
-    map_click = components.html(MAP_HTML, height=780, scrolling=False)
-
-    # 클릭 데이터 처리
-    if map_click and isinstance(map_click, dict):
-        if map_click.get("action") == "click":
-            lat = map_click.get("lat")
-            lng = map_click.get("lng")
-            if lat and lng:
-                if lat != st.session_state.last_lat or lng != st.session_state.last_lng:
-                    with st.spinner("건축물대장 조회 중..."):
-                        process_click(lat, lng)
-                    st.rerun()
-
-with col_left:
-    # 헤더
-    st.markdown("""
-<div style="background:#0d1117;border-bottom:1px solid rgba(255,255,255,.07);
-  padding:12px 14px;margin-bottom:12px;">
-  <div style="display:flex;align-items:center;gap:9px;">
-    <div style="width:28px;height:28px;background:linear-gradient(135deg,#38bdf8,#10b981);
-      border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:14px;">🏢</div>
-    <div>
-      <div style="font-size:.82rem;font-weight:700;color:#f0f6ff;">건축물대장 조회</div>
-      <div style="font-size:.56rem;color:#484f58;font-family:monospace;">KAKAO MAPS · VWORLD</div>
-    </div>
-    <div style="margin-left:auto;background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.25);
-      color:#10b981;padding:2px 8px;border-radius:20px;font-size:.6rem;font-weight:600;">● LIVE</div>
-  </div>
-</div>""", unsafe_allow_html=True)
-
-    # 주소 검색
-    st.markdown('<p style="font-size:.62rem;font-weight:700;color:#38bdf8;letter-spacing:.1em;text-transform:uppercase;margin-bottom:5px;">🔍 주소 검색</p>', unsafe_allow_html=True)
-    query = st.text_input("주소", placeholder="예: 강남구 테헤란로 152",
-                          label_visibility="collapsed", key="addr_q")
-    if st.button("검색", use_container_width=True, key="search_btn"):
-        if query:
-            with st.spinner("검색 중..."):
-                results = addr_search(query)
-            if results:
-                for doc in results:
-                    road = doc.get("road_address")
-                    main = road["address_name"] if road else doc["address_name"]
-                    sub  = doc["address_name"] if road else ""
-                    label = f"📍 {main}" + (f"\n↳ {sub}" if sub else "")
-                    if st.button(label, key=f"r_{doc['address_name']}", use_container_width=True):
-                        lat = float(doc["y"]); lng = float(doc["x"])
-                        with st.spinner("조회 중..."):
-                            process_click(lat, lng)
-                        st.rerun()
-            else:
-                st.warning("검색 결과가 없습니다.")
-
-    st.divider()
-
-    # 수동 PNU 입력
-    with st.expander("⚙️ 수동 PNU 코드 입력"):
-        sg = st.text_input("시군구코드(5자리)", max_chars=5, placeholder="11680", key="psg")
-        bd = st.text_input("법정동코드(5자리)", max_chars=5, placeholder="10300", key="pbd")
-        c1, c2 = st.columns(2)
-        with c1: bn = st.text_input("본번", placeholder="737", key="pbn")
-        with c2: ji = st.text_input("부번", placeholder="0",   key="pji")
-        if st.button("🏠 건축물대장 조회", use_container_width=True, key="manual_q"):
-            if sg and bd:
-                with st.spinner("조회 중..."):
-                    st.session_state.building_data = fetch_building(sg, bd, bn or "0", ji or "0")
-                st.session_state.current_addr = f"시군구:{sg} 법정동:{bd} ({bn}-{ji})"
-                st.rerun()
-            else:
-                st.warning("시군구코드와 법정동코드를 입력해 주세요.")
-
-    st.divider()
-
-    # ── 결과 표시 ─────────────────────────────────
-    def fa(v):
-        try: return f"{float(v):,.2f} ㎡"
-        except: return v or "-"
-    def fd(v):
-        if v and len(v) == 8:
-            return f"{v[:4]}.{v[4:6]}.{v[6:]}"
-        return v or "-"
-
-    def render_cell(label, value, highlight=False):
-        color = "#38bdf8" if highlight else "#c9d1d9"
-        return f"""<div style="background:#07090f;border:1px solid rgba(255,255,255,.04);
-          border-radius:5px;padding:7px;">
-          <div style="font-size:.55rem;font-weight:600;color:#484f58;text-transform:uppercase;
-            letter-spacing:.05em;margin-bottom:2px;">{label}</div>
-          <div style="font-size:.73rem;color:{color};font-family:monospace;">{value}</div>
-        </div>"""
-
-    if st.session_state.building_data is None:
-        st.markdown("""
-<div style="background:#161b22;border:1px dashed rgba(56,189,248,.15);border-radius:10px;
-  padding:24px 14px;text-align:center;">
-  <div style="font-size:1.8rem;margin-bottom:8px;">🗺️</div>
-  <div style="font-size:.8rem;font-weight:600;color:#c9d1d9;margin-bottom:5px;">지도를 클릭하세요</div>
-  <div style="font-size:.7rem;color:#484f58;line-height:1.7;">
-    지도의 원하는 위치를 클릭하면<br>
-    <strong style="color:#38bdf8;">건축물대장 정보</strong>가 표시됩니다.
-  </div>
-</div>""", unsafe_allow_html=True)
-
-    else:
-        bd_data = st.session_state.building_data
-        addr    = st.session_state.current_addr
-
-        if "error" in bd_data:
-            st.error(f"조회 오류: {bd_data['error']}")
-        else:
-            basis_items = bd_data.get("basis", {}).get("items", [])
-            title_items = bd_data.get("title", {}).get("items", [])
-
-            if not basis_items and not title_items:
-                st.warning("해당 위치의 건축물 정보가 없습니다.")
-            else:
-                if addr:
-                    st.caption(f"📍 {addr}")
-
-                for item in basis_items:
-                    bld_nm  = item.get("bldNm") or "건물명 미등록"
-                    use_nm  = item.get("mainPurpsCdNm") or item.get("mainPurpsCd") or "-"
-                    strct   = item.get("strctCdNm") or item.get("strctCd") or "-"
-                    grnd_fl = item.get("grndFlCnt") or "-"
-                    undr_fl = item.get("undgrndFlCnt") or "0"
-
-                    cells = "".join([
-                        render_cell("연면적",    fa(item.get("totArea")),   True),
-                        render_cell("건축면적",  fa(item.get("archArea"))),
-                        render_cell("대지면적",  fa(item.get("platArea"))),
-                        render_cell("건폐율/용적률",
-                            f"{item.get('bcRat') or '-'}% / {item.get('vlRat') or '-'}%"),
-                        render_cell("허가일",    fd(item.get("pmsDay"))),
-                        render_cell("사용승인일",fd(item.get("useAprDay"))),
-                    ])
-
-                    st.markdown(f"""
-<div style="background:#161b22;border:1px solid rgba(56,189,248,.15);border-radius:10px;
-  padding:13px;margin-bottom:10px;">
-  <div style="display:flex;align-items:center;gap:8px;margin-bottom:9px;">
-    <div style="width:30px;height:30px;background:linear-gradient(135deg,rgba(56,189,248,.15),rgba(16,185,129,.15));
-      border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:13px;
-      border:1px solid rgba(56,189,248,.15);flex-shrink:0;">🏢</div>
-    <div>
-      <div style="font-size:.82rem;font-weight:700;color:#f0f6ff;">{bld_nm}</div>
-      <div style="font-size:.65rem;color:#484f58;">{addr}</div>
-    </div>
-  </div>
-  <div style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:9px;">
-    <span style="background:rgba(56,189,248,.12);color:#38bdf8;border:1px solid rgba(56,189,248,.2);
-      font-size:.6rem;font-weight:600;padding:2px 6px;border-radius:4px;">{use_nm}</span>
-    <span style="background:rgba(16,185,129,.12);color:#10b981;border:1px solid rgba(16,185,129,.2);
-      font-size:.6rem;font-weight:600;padding:2px 6px;border-radius:4px;">{strct}</span>
-    <span style="background:rgba(245,158,11,.12);color:#f59e0b;border:1px solid rgba(245,158,11,.2);
-      font-size:.6rem;font-weight:600;padding:2px 6px;border-radius:4px;">
-      지상 {grnd_fl}층 / 지하 {undr_fl}층</span>
-  </div>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">{cells}</div>
-</div>""", unsafe_allow_html=True)
-
-                if title_items:
-                    st.markdown('<p style="font-size:.6rem;font-weight:700;color:#38bdf8;letter-spacing:.1em;text-transform:uppercase;margin:6px 0 5px;">표제부 상세</p>', unsafe_allow_html=True)
-                    for t in title_items[:3]:
-                        t_cells = "".join([
-                            render_cell("세대수",   f"{t.get('hhldCnt') or '-'} 세대"),
-                            render_cell("가구수",   f"{t.get('fmlyCnt') or '-'} 가구"),
-                            render_cell("승강기(일반/비상)",
-                                f"{t.get('elvtCnt') or '-'} / {t.get('emgenElevCnt') or '-'}"),
-                            render_cell("자주식 주차", f"{t.get('indrAutoUtcnt') or '-'} 대"),
-                        ])
-                        st.markdown(f"""
-<div style="background:#161b22;border:1px solid rgba(16,185,129,.15);border-radius:10px;
-  padding:11px;margin-bottom:7px;">
-  <div style="font-size:.78rem;font-weight:700;color:#f0f6ff;margin-bottom:7px;">
-    📦 {t.get("dongNm") or "주동"} — {t.get("mainPurpsCdNm") or "-"}
-  </div>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">{t_cells}</div>
-</div>""", unsafe_allow_html=True)
-
-        if st.button("↺ 초기화", use_container_width=True, key="reset_btn"):
-            st.session_state.building_data = None
-            st.session_state.current_addr  = ""
-            st.session_state.last_lat      = None
-            st.session_state.last_lng      = None
-            st.rerun()
+components.html(FULL_HTML, height=820, scrolling=False)
