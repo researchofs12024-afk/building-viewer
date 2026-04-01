@@ -417,34 +417,63 @@ function setStatus(type, icon, msg) {{
   document.getElementById('status-txt').textContent  = msg;
 }}
 
-// ── 카카오 REST API: 좌표→주소 (역지오코딩) ──
-// Python 서버를 거치지 않고 JS에서 직접 호출
-// 카카오 REST API는 HTTPS이므로 Mixed Content 없음
-async function coord2addr(lat, lng) {{
-  var url = 'https://dapi.kakao.com/v2/local/geo/coord2address.json?x='+lng+'&y='+lat;
-  var res  = await fetch(url, {{
-    headers: {{ 'Authorization': 'KakaoAK ' + KAKAO_REST }}
-  }});
-  var data = await res.json();
-  var docs = data.documents || [];
-  return docs.length ? docs[0] : null;
+// ── 카카오 REST API ──────────────────────────────────
+// ★ coord2address: 주소명 + 지번(본번/부번) 취득
+//   → 단, Address 응답에 b_code 없음 (공식문서 확인)
+// ★ coord2regioncode: 법정동 코드(b_code 10자리) 취득
+//   → region_type=="B" 인 document의 code 필드 사용
+// 두 API를 병렬 호출해서 PNU 전체를 조합
+
+async function fetchKakao(url) {{
+  var res = await fetch(url, {{ headers: {{ 'Authorization': 'KakaoAK ' + KAKAO_REST }} }});
+  return res.json();
 }}
 
-// ── PNU 코드 추출 ──
-// 카카오 coord2address 응답의 b_code(법정동코드 10자리)에서 추출
-function extractPNU(doc) {{
-  var land = doc.address || {{}};
-  var bCode = land.b_code || '';           // 10자리 법정동코드
-  // b_code 구조: 시군구코드(5) + 법정동코드(5)
-  var sigungu = bCode.slice(0, 5);
-  var bjdong  = bCode.slice(5, 10);
-  var bun     = land.main_address_no || '0';
-  var ji      = land.sub_address_no  || '0';
+async function getPNU(lat, lng) {{
+  var baseX = lng, baseY = lat;
 
-  var road    = doc.road_address || {{}};
-  var addr    = road.address_name || land.address_name || '';
+  // 두 API 병렬 호출
+  var [addrData, regionData] = await Promise.all([
+    fetchKakao('https://dapi.kakao.com/v2/local/geo/coord2address.json?x='+baseX+'&y='+baseY),
+    fetchKakao('https://dapi.kakao.com/v2/local/geo/coord2regioncode.json?x='+baseX+'&y='+baseY),
+  ]);
 
-  return {{ sigungu: sigungu, bjdong: bjdong, bun: bun, ji: ji, addr: addr, bCode: bCode }};
+  // ── coord2address: 주소명 + 본번/부번 ──
+  var addrDoc  = (addrData.documents  || [])[0] || {{}};
+  var land     = addrDoc.address      || {{}};
+  var road     = addrDoc.road_address || {{}};
+  var addrName = road.address_name || land.address_name || '';
+  var bun      = land.main_address_no || '0';
+  var ji       = land.sub_address_no  || '0';
+
+  // ── coord2regioncode: 법정동 코드(10자리) ──
+  // region_type이 "B"(법정동)인 항목의 code 사용
+  var bCode    = '';
+  var regions  = regionData.documents || [];
+  for (var i = 0; i < regions.length; i++) {{
+    if (regions[i].region_type === 'B') {{
+      bCode = regions[i].code || '';   // 예: "1111010100" (10자리)
+      break;
+    }}
+  }}
+
+  var sigungu = bCode.slice(0, 5);   // 앞 5자리: 시군구코드
+  var bjdong  = bCode.slice(5, 10);  // 뒤 5자리: 법정동코드
+
+  // 콘솔 로그 (디버깅용)
+  console.log('[PNU] 좌표:', lat, lng);
+  console.log('[PNU] 주소:', addrName);
+  console.log('[PNU] b_code(법정동코드 10자리):', bCode);
+  console.log('[PNU] 시군구:', sigungu, '| 법정동:', bjdong, '| 본번:', bun, '| 부번:', ji);
+
+  return {{
+    sigungu : sigungu,
+    bjdong  : bjdong,
+    bun     : bun,
+    ji      : ji,
+    addr    : addrName,
+    bCode   : bCode,
+  }};
 }}
 
 // ── Streamlit URL 파라미터로 건축물대장 조회 요청 ──
@@ -516,28 +545,15 @@ kakao.maps.load(function() {{
     setStatus('loading', '⏳', '주소 변환 중...');
 
     try {{
-      // STEP 1: 좌표 → 주소 + PNU 코드 (카카오 REST API)
-      var doc = await coord2addr(lat, lng);
-      if (!doc) {{
-        setStatus('err', '❌', '주소를 찾을 수 없습니다.');
-        return;
-      }}
-
-      var pnu = extractPNU(doc);
-      setStatus('loading', '⏳', '주소 확인: ' + pnu.addr);
-
-      // 개발자 확인용 콘솔 출력
-      console.log('[건축물대장] 좌표:', lat, lng);
-      console.log('[건축물대장] 주소:', pnu.addr);
-      console.log('[건축물대장] b_code:', pnu.bCode);
-      console.log('[건축물대장] 시군구:', pnu.sigungu, '법정동:', pnu.bjdong, '본번:', pnu.bun, '부번:', pnu.ji);
+      // coord2address + coord2regioncode 병렬 호출 → PNU 조합
+      var pnu = await getPNU(lat, lng);
 
       if (!pnu.sigungu || pnu.sigungu.length < 4) {{
         setStatus('err', '❌', '지번 코드를 추출할 수 없습니다. 다른 위치를 클릭해 보세요.');
         return;
       }}
 
-      // STEP 2: PNU 코드로 건축물대장 조회 (Streamlit Python 경유)
+      setStatus('loading', '⏳', '건축물대장 조회 중: ' + pnu.addr);
       await queryBuilding(pnu);
 
     }} catch(err) {{
@@ -636,11 +652,8 @@ async function pickResult(i) {{
   setStatus('loading', '⏳', '주소 변환 중...');
 
   try {{
-    var addrDoc = await coord2addr(lat, lng);
-    if (!addrDoc) {{ addrDoc = {{ address: doc.address, road_address: doc.road_address }}; }}
-    var pnu = extractPNU(addrDoc);
+    var pnu = await getPNU(lat, lng);
     if (!pnu.addr) pnu.addr = doc.address_name;
-
     console.log('[검색결과] PNU:', pnu);
     await queryBuilding(pnu);
   }} catch(err) {{
