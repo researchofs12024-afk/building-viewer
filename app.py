@@ -1,8 +1,5 @@
 import streamlit as st
 import streamlit.components.v1 as components
-import requests
-import xml.etree.ElementTree as ET
-import json
 
 st.set_page_config(
     page_title="건축물대장 조회 시스템",
@@ -26,111 +23,8 @@ section[data-testid="stSidebar"]{display:none;}
 iframe{border:none!important;}
 </style>""", unsafe_allow_html=True)
 
-# ── 세션 상태 ─────────────────────────────────────
-for k, v in {
-    "building_data": None,
-    "current_addr":  "",
-    "pnu": {},
-}.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
-
-# ── API 함수 ──────────────────────────────────────
-def fetch_building(sigungu, bjdong, bun, ji):
-    def mk_url(ep):
-        qs = "&".join([
-            f"sigunguCd={sigungu}",
-            f"bjdongCd={bjdong}",
-            "platGbCd=0",
-            f"bun={str(bun).zfill(4)}",
-            f"ji={str(ji or 0).zfill(4)}",
-            "startDate=", "endDate=",
-            "numOfRows=10", "pageNo=1",
-            f"serviceKey={BUILDING_API_KEY}",
-        ])
-        return f"http://apis.data.go.kr/1613000/BldRgstService_v2/{ep}?{qs}"
-
-    def parse(txt):
-        try:
-            root = ET.fromstring(txt)
-            code = root.find(".//resultCode")
-            if code is not None and code.text != "00":
-                msg = root.find(".//resultMsg")
-                return {"error": msg.text if msg else "API 오류"}
-            return {"items": [{c.tag: (c.text or "") for c in i}
-                               for i in root.findall(".//item")]}
-        except Exception as e:
-            return {"error": str(e)}
-
-    try:
-        r1 = requests.get(mk_url("getBrBasisOulnInfo"), timeout=10)
-        r2 = requests.get(mk_url("getBrTitleInfo"),     timeout=10)
-        return {"basis": parse(r1.text), "title": parse(r2.text)}
-    except Exception as e:
-        return {"error": str(e)}
-
-def addr_search(query):
-    try:
-        r = requests.get(
-            "https://dapi.kakao.com/v2/local/search/address.json",
-            headers={"Authorization": f"KakaoAK {KAKAO_REST_KEY}"},
-            params={"query": query, "size": 5}, timeout=5)
-        return r.json().get("documents", [])
-    except:
-        return []
-
-# ══════════════════════════════════════════════════
-# query_params 수신
-# 지도 JS → Streamlit URL (?action=...) → Python 처리
-# ★ allow-top-navigation-by-user-activation 없이도
-#   Streamlit이 직접 URL을 바꾸는 게 아니라
-#   JS에서 history.replaceState로 같은 origin 내
-#   파라미터만 바꾸는 방식 사용
-# ══════════════════════════════════════════════════
-qp = st.query_params
-action = qp.get("action", "")
-
-if action == "query":
-    # 지도가 이미 역지오코딩 완료 후 PNU 코드를 넘겨준 경우
-    sigungu = qp.get("sigungu", "")
-    bjdong  = qp.get("bjdong",  "")
-    bun     = qp.get("bun",     "0")
-    ji      = qp.get("ji",      "0")
-    addr    = qp.get("addr",    "")
-
-    if sigungu and bjdong:
-        result = fetch_building(sigungu, bjdong, bun, ji)
-        st.session_state.building_data = result
-        st.session_state.current_addr  = addr
-        st.session_state.pnu = {
-            "sigungu": sigungu, "bjdong": bjdong, "bun": bun, "ji": ji
-        }
-    st.query_params.clear()
-    st.rerun()
-
-# ══════════════════════════════════════════════════
-# 전체 UI를 하나의 HTML 컴포넌트로
-# 카카오맵 + 좌측 패널 모두 HTML 안에 구현
-# Python은 건축물대장 API 조회 전용으로만 사용
-# ══════════════════════════════════════════════════
-
-# 현재 건물 데이터를 JSON으로 HTML에 주입
-bld_json = json.dumps(st.session_state.building_data or {}, ensure_ascii=False)
-addr_str  = st.session_state.current_addr.replace('"', '&quot;')
-
-def fa(v):
-    try: return f"{float(v):,.2f} ㎡"
-    except: return v or "-"
-
-def fd(v):
-    if v and len(v) == 8:
-        return f"{v[:4]}.{v[4:6]}.{v[6:]}"
-    return v or "-"
-
-# 건물 정보 HTML 미리 생성 (Python에서 렌더링)
-def render_building_html(bd, addr):
-    if not bd:
-        return """
+# JS에서 클릭 후 동적으로 교체되는 초기 안내 HTML
+BLD_INIT_HTML = """
 <div class="guide-box">
   <div class="gi">🗺️</div>
   <div class="gt">지도를 클릭하세요</div>
@@ -142,72 +36,6 @@ def render_building_html(bd, addr):
   </div>
 </div>"""
 
-    if "error" in bd:
-        return f'<div class="err-box">⚠️ {bd["error"]}</div>'
-
-    basis = bd.get("basis", {}).get("items", [])
-    title = bd.get("title", {}).get("items", [])
-
-    if not basis and not title:
-        return '<div class="err-box">⚠️ 건축물 정보가 없습니다.</div>'
-
-    html = f'<div class="addr-bar">📍 {addr}</div>'
-
-    for item in basis:
-        bld_nm  = item.get("bldNm") or "건물명 미등록"
-        use_nm  = item.get("mainPurpsCdNm") or item.get("mainPurpsCd") or "-"
-        strct   = item.get("strctCdNm") or item.get("strctCd") or "-"
-        grnd_fl = item.get("grndFlCnt") or "-"
-        undr_fl = item.get("undgrndFlCnt") or "0"
-        html += f"""
-<div class="bcard">
-  <div class="bhead">
-    <div class="bico">🏢</div>
-    <div>
-      <div class="bnm">{bld_nm}</div>
-      <div class="badr">{addr}</div>
-    </div>
-  </div>
-  <div class="tags">
-    <span class="tag tb">{use_nm}</span>
-    <span class="tag tg">{strct}</span>
-    <span class="tag ta">지상{grnd_fl}층/지하{undr_fl}층</span>
-  </div>
-  <div class="grid2">
-    <div class="cell"><div class="clbl">연면적</div><div class="cval hi">{fa(item.get("totArea"))}</div></div>
-    <div class="cell"><div class="clbl">건축면적</div><div class="cval">{fa(item.get("archArea"))}</div></div>
-    <div class="cell"><div class="clbl">대지면적</div><div class="cval">{fa(item.get("platArea"))}</div></div>
-    <div class="cell"><div class="clbl">건폐율/용적률</div><div class="cval">{item.get("bcRat") or "-"}%/{item.get("vlRat") or "-"}%</div></div>
-    <div class="cell"><div class="clbl">허가일</div><div class="cval">{fd(item.get("pmsDay"))}</div></div>
-    <div class="cell"><div class="clbl">사용승인일</div><div class="cval">{fd(item.get("useAprDay"))}</div></div>
-  </div>
-</div>"""
-
-    if title:
-        html += '<div class="sec-title">표제부 상세</div>'
-        for t in title[:3]:
-            html += f"""
-<div class="bcard" style="border-color:rgba(16,185,129,.2)">
-  <div class="bhead">
-    <div class="bico" style="background:linear-gradient(135deg,rgba(16,185,129,.15),rgba(56,189,248,.1))">📦</div>
-    <div>
-      <div class="bnm">{t.get("dongNm") or "주동"}</div>
-      <div class="badr">{t.get("mainPurpsCdNm") or "-"}</div>
-    </div>
-  </div>
-  <div class="grid2">
-    <div class="cell"><div class="clbl">세대수</div><div class="cval">{t.get("hhldCnt") or "-"} 세대</div></div>
-    <div class="cell"><div class="clbl">가구수</div><div class="cval">{t.get("fmlyCnt") or "-"} 가구</div></div>
-    <div class="cell"><div class="clbl">승강기(일반/비상)</div><div class="cval">{t.get("elvtCnt") or "-"}/{t.get("emgenElevCnt") or "-"}</div></div>
-    <div class="cell"><div class="clbl">자주식주차</div><div class="cval">{t.get("indrAutoUtcnt") or "-"} 대</div></div>
-  </div>
-</div>"""
-    return html
-
-bld_html = render_building_html(
-    st.session_state.building_data,
-    st.session_state.current_addr
-)
 
 FULL_HTML = f"""<!DOCTYPE html>
 <html lang="ko">
@@ -369,8 +197,8 @@ html,body{{height:100%;overflow:hidden;background:var(--bg);color:var(--t);
         <div class="slbl">주소 검색</div>
         <div class="srow">
           <input id="si" type="text" placeholder="예: 강남구 테헤란로 152" autocomplete="off">
-          <button class="btn" onclick="doSearch()">검색</button>
-          <button class="btn btng" onclick="resetAll()">↺</button>
+          <button class="btn" ON-CLICK="doSearch()">검색</button>
+          <button class="btn btng" ON-CLICK="resetAll()">↺</button>
         </div>
         <div id="sres"></div>
       </div>
@@ -381,9 +209,9 @@ html,body{{height:100%;overflow:hidden;background:var(--bg);color:var(--t);
         <span id="status-txt">지도를 클릭하거나 주소를 검색하세요</span>
       </div>
 
-      <!-- 건물 정보 -->
+      <!-- 건물 정보 (JS가 동적으로 교체) -->
       <div id="bld-info">
-        {bld_html}
+        {BLD_INIT_HTML}
       </div>
 
     </div>
@@ -393,13 +221,13 @@ html,body{{height:100%;overflow:hidden;background:var(--bg);color:var(--t);
   <div id="ma">
     <div id="map"></div>
     <div id="lc">
-      <button class="lb on" id="b1" onclick="setT('road')">🗺 일반</button>
-      <button class="lb" id="b2" onclick="setT('sky')">🛰 위성</button>
-      <button class="lb" id="b3" onclick="toggleJ()">📐 지적도</button>
+      <button class="lb on" id="b1" ON-CLICK="setT('road')">🗺 일반</button>
+      <button class="lb" id="b2" ON-CLICK="setT('sky')">🛰 위성</button>
+      <button class="lb" id="b3" ON-CLICK="toggleJ()">📐 지적도</button>
     </div>
     <div id="zc">
-      <button class="lb sq" onclick="map&&map.setLevel(map.getLevel()-1)">＋</button>
-      <button class="lb sq" onclick="map&&map.setLevel(map.getLevel()+1)">－</button>
+      <button class="lb sq" ON-CLICK="map&&map.setLevel(map.getLevel()-1)">＋</button>
+      <button class="lb sq" ON-CLICK="map&&map.setLevel(map.getLevel()+1)">－</button>
     </div>
     <div id="cb">지도를 클릭하면 건축물대장이 조회됩니다</div>
   </div>
@@ -476,45 +304,162 @@ async function getPNU(lat, lng) {{
   }};
 }}
 
-// ── Streamlit URL 파라미터로 건축물대장 조회 요청 ──
-// history.pushState는 sandbox에서 허용됨 (same-origin 내)
-// 단, Streamlit iframe은 about:srcdoc → pushState 불가
-// → 대신 Streamlit의 st.query_params를 활용하기 위해
-//   현재 Streamlit 앱 URL을 직접 변경
-// ★ 해결책: 직접 fetch로 Streamlit 앱에 GET 요청
-//   Streamlit이 action=query를 받아서 처리 후 rerun
+// ── 건축물대장 API 직접 호출 (JS에서 직접) ──────────
+// 공공데이터포털(apis.data.go.kr)은 CORS 허용
+// → JS에서 직접 XML 응답을 받아 파싱
+var BUILD_KEY = '{BUILDING_API_KEY}';
+var BUILD_BASE = 'https://apis.data.go.kr/1613000/BldRgstService_v2';
+
+function buildApiUrl(endpoint, sigungu, bjdong, bun, ji) {{
+  var qs = [
+    'sigunguCd=' + sigungu,
+    'bjdongCd='  + bjdong,
+    'platGbCd=0',
+    'bun='  + String(bun).padStart(4, '0'),
+    'ji='   + String(ji || '0').padStart(4, '0'),
+    'startDate=',
+    'endDate=',
+    'numOfRows=10',
+    'pageNo=1',
+    'serviceKey=' + BUILD_KEY,
+  ].join('&');
+  return BUILD_BASE + '/' + endpoint + '?' + qs;
+}}
+
+function parseXml(xmlText) {{
+  var parser = new DOMParser();
+  var doc    = parser.parseFromString(xmlText, 'application/xml');
+  var codeEl = doc.querySelector('resultCode');
+  if (codeEl && codeEl.textContent !== '00') {{
+    var msgEl = doc.querySelector('resultMsg');
+    return {{ error: msgEl ? msgEl.textContent : 'API 오류' }};
+  }}
+  var items = Array.from(doc.querySelectorAll('item'));
+  if (!items.length) return {{ items: [] }};
+  return {{
+    items: items.map(function(item) {{
+      var obj = {{}};
+      Array.from(item.children).forEach(function(c) {{
+        obj[c.tagName] = c.textContent.trim();
+      }});
+      return obj;
+    }})
+  }};
+}}
+
 async function queryBuilding(pnu) {{
-  setStatus('loading', '⏳', '건축물대장 조회 중... (' + pnu.addr + ')');
+  setStatus('loading', '⏳', '건축물대장 조회 중: ' + pnu.addr);
   document.getElementById('bld-info').innerHTML =
     '<div style="text-align:center;padding:30px;color:var(--t3);">' +
     '<div class="spin" style="width:24px;height:24px;margin:0 auto 10px;border-width:3px;' +
     'border-color:rgba(56,189,248,.15);border-top-color:var(--ac);"></div>' +
     '<div style="font-size:.73rem;">건축물대장 조회 중...</div></div>';
 
-  var params = new URLSearchParams({{
-    action:  'query',
-    sigungu: pnu.sigungu,
-    bjdong:  pnu.bjdong,
-    bun:     pnu.bun,
-    ji:      pnu.ji,
-    addr:    pnu.addr,
+  try {{
+    var [basisRes, titleRes] = await Promise.all([
+      fetch(buildApiUrl('getBrBasisOulnInfo', pnu.sigungu, pnu.bjdong, pnu.bun, pnu.ji)),
+      fetch(buildApiUrl('getBrTitleInfo',     pnu.sigungu, pnu.bjdong, pnu.bun, pnu.ji)),
+    ]);
+
+    var [basisText, titleText] = await Promise.all([
+      basisRes.text(),
+      titleRes.text(),
+    ]);
+
+    console.log('[건축물대장 기본개요 응답]', basisText.slice(0, 300));
+
+    var basis = parseXml(basisText);
+    var title = parseXml(titleText);
+
+    if (basis.error) {{
+      setStatus('err', '❌', '기본개요 오류: ' + basis.error);
+      document.getElementById('bld-info').innerHTML =
+        '<div class="err-box">⚠️ ' + basis.error + '</div>';
+      return;
+    }}
+
+    renderBuilding(basis.items || [], title.items || [], pnu.addr);
+    setStatus('done', '✅', '조회 완료: ' + pnu.addr);
+
+  }} catch(err) {{
+    console.error('[건축물대장] fetch 오류:', err);
+    // CORS 오류 시 상세 안내
+    setStatus('err', '❌', 'API 오류: ' + err.message);
+    document.getElementById('bld-info').innerHTML =
+      '<div class="err-box">⚠️ 건축물대장 API 호출 오류<br><br>' +
+      '<strong>오류:</strong> ' + err.message + '<br><br>' +
+      '수동 PNU 입력 기능을 사용해 주세요.<br>' +
+      '시군구: ' + pnu.sigungu + ' | 법정동: ' + pnu.bjdong + '<br>' +
+      '본번: ' + pnu.bun + ' | 부번: ' + pnu.ji + '</div>';
+  }}
+}}
+
+// ── 건축물 정보 렌더링 ──────────────────────────────
+function fmtArea(v) {{
+  var n = parseFloat(v);
+  return isNaN(n) ? (v || '-') : n.toLocaleString('ko', {{minimumFractionDigits:2, maximumFractionDigits:2}}) + ' ㎡';
+}}
+function fmtDate(v) {{
+  if (!v || v.length < 8) return v || '-';
+  return v.slice(0,4) + '.' + v.slice(4,6) + '.' + v.slice(6,8);
+}}
+
+function renderBuilding(basis, title, addr) {{
+  if (!basis.length && !title.length) {{
+    document.getElementById('bld-info').innerHTML =
+      '<div class="err-box">⚠️ 해당 위치의 건축물 정보가 없습니다.</div>';
+    return;
+  }}
+
+  var h = '<div class="addr-bar">📍 ' + addr + '</div>';
+
+  basis.forEach(function(x) {{
+    h += '<div class="bcard">' +
+      '<div class="bhead">' +
+        '<div class="bico">🏢</div>' +
+        '<div>' +
+          '<div class="bnm">' + (x.bldNm || '건물명 미등록') + '</div>' +
+          '<div class="badr">' + addr + '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="tags">' +
+        '<span class="tag tb">' + (x.mainPurpsCdNm || x.mainPurpsCd || '-') + '</span>' +
+        '<span class="tag tg">' + (x.strctCdNm || x.strctCd || '-') + '</span>' +
+        '<span class="tag ta">지상' + (x.grndFlCnt||'-') + '층/지하' + (x.undgrndFlCnt||'0') + '층</span>' +
+      '</div>' +
+      '<div class="grid2">' +
+        '<div class="cell"><div class="clbl">연면적</div><div class="cval hi">' + fmtArea(x.totArea) + '</div></div>' +
+        '<div class="cell"><div class="clbl">건축면적</div><div class="cval">' + fmtArea(x.archArea) + '</div></div>' +
+        '<div class="cell"><div class="clbl">대지면적</div><div class="cval">' + fmtArea(x.platArea) + '</div></div>' +
+        '<div class="cell"><div class="clbl">건폐율/용적률</div><div class="cval">' + (x.bcRat||'-') + '%/' + (x.vlRat||'-') + '%</div></div>' +
+        '<div class="cell"><div class="clbl">허가일</div><div class="cval">' + fmtDate(x.pmsDay) + '</div></div>' +
+        '<div class="cell"><div class="clbl">사용승인일</div><div class="cval">' + fmtDate(x.useAprDay) + '</div></div>' +
+      '</div>' +
+    '</div>';
   }});
 
-  // Streamlit 앱 URL에 파라미터를 붙여서 이동
-  // → Streamlit이 query_params를 읽고 처리 후 rerun
-  // ★ 핵심: top-level window URL 변경 (iframe 자신이 아닌 parent)
-  //   sandbox="allow-top-navigation-by-user-activation" 필요
-  //   → Streamlit은 이 권한을 허용함
-  try {{
-    window.top.location.href = window.top.location.href.split('?')[0] + '?' + params.toString();
-  }} catch(e) {{
-    // fallback: location.replace
-    try {{
-      window.location.href = '?' + params.toString();
-    }} catch(e2) {{
-      setStatus('err', '❌', '페이지 이동 실패. 수동 PNU 입력을 사용해 주세요.');
-    }}
+  if (title.length) {{
+    h += '<div class="sec-title">표제부 상세</div>';
+    title.slice(0,3).forEach(function(t) {{
+      h += '<div class="bcard" style="border-color:rgba(16,185,129,.2)">' +
+        '<div class="bhead">' +
+          '<div class="bico" style="background:linear-gradient(135deg,rgba(16,185,129,.15),rgba(56,189,248,.1))">📦</div>' +
+          '<div>' +
+            '<div class="bnm">' + (t.dongNm||'주동') + '</div>' +
+            '<div class="badr">' + (t.mainPurpsCdNm||'-') + '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="grid2">' +
+          '<div class="cell"><div class="clbl">세대수</div><div class="cval">' + (t.hhldCnt||'-') + ' 세대</div></div>' +
+          '<div class="cell"><div class="clbl">가구수</div><div class="cval">' + (t.fmlyCnt||'-') + ' 가구</div></div>' +
+          '<div class="cell"><div class="clbl">승강기(일반/비상)</div><div class="cval">' + (t.elvtCnt||'-') + '/' + (t.emgenElevCnt||'-') + '</div></div>' +
+          '<div class="cell"><div class="clbl">자주식주차</div><div class="cval">' + (t.indrAutoUtcnt||'-') + ' 대</div></div>' +
+        '</div>' +
+      '</div>';
+    }});
   }}
+
+  document.getElementById('bld-info').innerHTML = h;
 }}
 
 // ── 카카오맵 초기화 ──
@@ -628,7 +573,7 @@ async function doSearch() {{
       var road = d.road_address;
       var main = road ? road.address_name : d.address_name;
       var sub  = road ? d.address_name : '';
-      return '<div class="ri" onclick="pickResult(' + i + ')">' +
+      return '<div class="ri" ON-CLICK="pickResult(' + i + ')">' +
              '<div class="rm">📍 ' + main + '</div>' +
              (sub ? '<div class="rs">' + sub + '</div>' : '') +
              '</div>';
