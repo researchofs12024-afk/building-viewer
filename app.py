@@ -1,8 +1,29 @@
 import streamlit as st
 import streamlit.components.v1 as components
+import requests
 
 st.set_page_config(layout="wide")
 
+st.title("Kakao Parcel Viewer (Final Working Version)")
+
+# -----------------------------
+# 🔥 Query Param으로 API 역할
+# -----------------------------
+params = st.query_params
+
+if "api" in params and params["api"] == "parcel":
+    bbox = params.get("bbox")
+
+    url = f"https://api.vworld.kr/req/wfs?key=F12043F0-86DF-3395-9004-27A377FD5FB6&service=WFS&request=GetFeature&typename=lp_pa_cbnd_bonbun&output=application/json&bbox={bbox}"
+
+    res = requests.get(url)
+    st.json(res.json())
+    st.stop()
+
+
+# -----------------------------
+# 🔥 지도 HTML
+# -----------------------------
 html_code = """
 <!DOCTYPE html>
 <html>
@@ -26,13 +47,11 @@ kakao.maps.load(function() {
 
     var polygons = [];
 
-    // 🔥 JSONP 콜백 함수
-    window.vworldCallback = function(data) {
-
+    function draw(data) {
         polygons.forEach(p => p.setMap(null));
         polygons = [];
 
-        if (!data || !data.features) return;
+        if (!data.features) return;
 
         data.features.forEach(feature => {
 
@@ -60,7 +79,7 @@ kakao.maps.load(function() {
             });
 
         });
-    };
+    }
 
     kakao.maps.event.addListener(map, 'click', function(mouseEvent) {
 
@@ -69,23 +88,11 @@ kakao.maps.load(function() {
 
         var bbox = (lng-0.0003) + "," + (lat-0.0003) + "," + (lng+0.0003) + "," + (lat+0.0003);
 
-        // 🔥 기존 script 제거
-        var oldScript = document.getElementById("vworldScript");
-        if (oldScript) oldScript.remove();
-
-        // 🔥 JSONP 요청
-        var script = document.createElement("script");
-        script.id = "vworldScript";
-        script.src = "https://api.vworld.kr/req/wfs?" +
-            "key=F12043F0-86DF-3395-9004-27A377FD5FB6" +
-            "&service=WFS" +
-            "&request=GetFeature" +
-            "&typename=lp_pa_cbnd_bonbun" +
-            "&output=application/json" +
-            "&bbox=" + bbox +
-            "&callback=vworldCallback";
-
-        document.body.appendChild(script);
+        fetch("?api=parcel&bbox=" + bbox)
+        .then(res => res.json())
+        .then(data => {
+            draw(data);
+        });
 
     });
 
