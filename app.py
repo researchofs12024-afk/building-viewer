@@ -1,36 +1,18 @@
 import streamlit as st
 import streamlit.components.v1 as components
-import requests
+import json
 
 st.set_page_config(layout="wide")
 
-st.title("Kakao Parcel Viewer (Final Working Version)")
+# 👉 중구 GeoJSON만 로드
+with open("서울중구.geojson", "r", encoding="utf-8") as f:
+    junggu = json.load(f)
 
-# -----------------------------
-# 🔥 Query Param으로 API 역할
-# -----------------------------
-params = st.query_params
-
-if "api" in params and params["api"] == "parcel":
-    bbox = params.get("bbox")
-
-    url = f"https://api.vworld.kr/req/wfs?key=F12043F0-86DF-3395-9004-27A377FD5FB6&service=WFS&request=GetFeature&typename=lp_pa_cbnd_bonbun&output=application/json&bbox={bbox}"
-
-    res = requests.get(url)
-    st.json(res.json())
-    st.stop()
-
-
-# -----------------------------
-# 🔥 지도 HTML
-# -----------------------------
-html_code = """
+html_code = f"""
 <!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
-
 <script src="https://dapi.kakao.com/v2/maps/sdk.js?appkey=057a4a253017791fe6072d7b089a063a&autoload=false"></script>
 </head>
 
@@ -38,65 +20,78 @@ html_code = """
 <div id="map" style="width:100%;height:100vh;"></div>
 
 <script>
-kakao.maps.load(function() {
 
-    var map = new kakao.maps.Map(document.getElementById('map'), {
-        center: new kakao.maps.LatLng(37.5665, 126.9780),
-        level: 2
-    });
+var geojson = {json.dumps(junggu)};
 
-    var polygons = [];
+kakao.maps.load(function() {{
 
-    function draw(data) {
-        polygons.forEach(p => p.setMap(null));
-        polygons = [];
+    var map = new kakao.maps.Map(document.getElementById('map'), {{
+        center: new kakao.maps.LatLng(37.5636, 126.9976), // 👉 중구 중심
+        level: 4
+    }});
 
-        if (!data.features) return;
+    var selectedPolygon = null;
 
-        data.features.forEach(feature => {
+    function pointInPolygon(point, vs) {{
+        var x = point[0], y = point[1];
+        var inside = false;
 
-            var coords = feature.geometry.coordinates;
+        for (var i = 0, j = vs.length - 1; i < vs.length; j = i++) {{
+            var xi = vs[i][0], yi = vs[i][1];
+            var xj = vs[j][0], yj = vs[j][1];
 
-            coords.forEach(polygonSet => {
-                polygonSet.forEach(ring => {
+            var intersect = ((yi > y) != (yj > y))
+                && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
 
-                    var path = ring.map(coord => {
-                        return new kakao.maps.LatLng(coord[1], coord[0]);
-                    });
+            if (intersect) inside = !inside;
+        }}
 
-                    var polygon = new kakao.maps.Polygon({
-                        path: path,
-                        strokeWeight: 2,
-                        strokeColor: '#FF0000',
-                        fillColor: '#FF0000',
-                        fillOpacity: 0.3
-                    });
+        return inside;
+    }}
 
-                    polygon.setMap(map);
-                    polygons.push(polygon);
-
-                });
-            });
-
-        });
-    }
-
-    kakao.maps.event.addListener(map, 'click', function(mouseEvent) {
+    kakao.maps.event.addListener(map, 'click', function(mouseEvent) {{
 
         var lat = mouseEvent.latLng.getLat();
         var lng = mouseEvent.latLng.getLng();
 
-        var bbox = (lng-0.001) + "," + (lat-0.001) + "," + (lng+0.001) + "," + (lat+0.001);
+        if (selectedPolygon) {{
+            selectedPolygon.setMap(null);
+        }}
 
-        fetch("?api=parcel&bbox=" + bbox)
-        .then(res => res.json())
-        .then(data => {
-            draw(data);
-        });
+        for (var f of geojson.features) {{
 
-    });
+            var coords = f.geometry.coordinates;
 
-});
+            for (var polygonSet of coords) {{
+                for (var ring of polygonSet) {{
+
+                    if (pointInPolygon([lng, lat], ring)) {{
+
+                        var path = ring.map(coord => 
+                            new kakao.maps.LatLng(coord[1], coord[0])
+                        );
+
+                        selectedPolygon = new kakao.maps.Polygon({{
+                            path: path,
+                            strokeWeight: 2,
+                            strokeColor: '#FF0000',
+                            fillColor: '#FF0000',
+                            fillOpacity: 0.3
+                        }});
+
+                        selectedPolygon.setMap(map);
+                        return;
+                    }}
+                }}
+            }}
+
+        }}
+
+        console.log("중구 외 지역이거나 필지 없음");
+
+    }});
+
+}});
 </script>
 
 </body>
