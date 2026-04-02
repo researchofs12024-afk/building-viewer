@@ -86,7 +86,7 @@ kakao.maps.load(function() {
         var lat = mouseEvent.latLng.getLat();
         var lng = mouseEvent.latLng.getLng();
 
-        var bbox = (lng-0.0003) + "," + (lat-0.0003) + "," + (lng+0.0003) + "," + (lat+0.0003);
+        var bbox = (lng-0.001) + "," + (lat-0.001) + "," + (lng+0.001) + "," + (lat+0.001);
 
         fetch("?api=parcel&bbox=" + bbox)
         .then(res => res.json())
