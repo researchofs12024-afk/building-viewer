@@ -2,8 +2,6 @@ import streamlit as st
 import streamlit.components.v1 as components
 import requests
 import xml.etree.ElementTree as ET
-import json
-import time
 
 st.set_page_config(
     page_title="건축물대장 조회 시스템",
@@ -17,7 +15,6 @@ KAKAO_REST_KEY   = "c5af33c0d1d6a654362d3fea152cc076"
 BUILDING_API_KEY = "9619e124e16b9e57bad6cfefdc82f6c87749176260b4caff32eda964aad5de1b"
 VWORLD_KEY       = "F12043F0-86DF-3395-9004-27A377FD5FB6"
 
-# ── UI 숨기기 ─────────────────────────────────────
 st.markdown("""
 <style>
 #MainMenu,footer,header,.stDeployButton{display:none!important;}
@@ -28,21 +25,23 @@ section[data-testid="stSidebar"]{display:none;}
 iframe{border:none!important;}
 div[data-testid="stHorizontalBlock"]{gap:0!important;}
 div[data-testid="column"]{padding:0!important;}
+/* 좌표 입력창 숨기기 */
+div[data-testid="stTextInput"]:has(input[data-coord-input="true"]) {
+    display: none !important;
+}
 </style>""", unsafe_allow_html=True)
 
 # ── 세션 상태 ─────────────────────────────────────
 for k, v in {
-    "click_lat": None, "click_lng": None,
-    "click_ts": 0,
-    "building_data": None, "current_addr": "",
-    "last_processed_ts": 0,
+    "building_data": None,
+    "current_addr":  "",
+    "last_coord":    "",
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-# ── Python API 함수 ──────────────────────────────
+# ── API 함수 ──────────────────────────────────────
 def coord2pnu(lat, lng):
-    """좌표 → 주소 + PNU 코드 (카카오 REST, Python에서 호출)"""
     try:
         r1 = requests.get(
             "https://dapi.kakao.com/v2/local/geo/coord2address.json",
@@ -53,18 +52,15 @@ def coord2pnu(lat, lng):
             headers={"Authorization": f"KakaoAK {KAKAO_REST_KEY}"},
             params={"x": lng, "y": lat}, timeout=5)
 
-        addr_docs   = r1.json().get("documents", [])
-        region_docs = r2.json().get("documents", [])
-
-        addr_doc = addr_docs[0] if addr_docs else {}
-        land     = addr_doc.get("address") or {}
-        road     = addr_doc.get("road_address") or {}
+        addr_doc = (r1.json().get("documents") or [{}])[0]
+        land = addr_doc.get("address") or {}
+        road = addr_doc.get("road_address") or {}
         addr_name = road.get("address_name") or land.get("address_name") or ""
-        bun       = land.get("main_address_no", "0")
-        ji        = land.get("sub_address_no",  "0")
+        bun = land.get("main_address_no", "0")
+        ji  = land.get("sub_address_no",  "0")
 
         b_code = ""
-        for r in region_docs:
+        for r in (r2.json().get("documents") or []):
             if r.get("region_type") == "B":
                 b_code = r.get("code", "")
                 break
@@ -75,13 +71,11 @@ def coord2pnu(lat, lng):
             "bjdong":  b_code[5:10] if len(b_code) >= 10 else "",
             "bun":     bun,
             "ji":      ji,
-            "b_code":  b_code,
         }
     except Exception as e:
         return {"error": str(e)}
 
 def fetch_building(sigungu, bjdong, bun, ji):
-    """건축물대장 조회 (공공데이터포털, Python 서버에서 호출 → CORS 없음)"""
     def mk_url(ep):
         qs = "&".join([
             f"sigunguCd={sigungu}", f"bjdongCd={bjdong}", "platGbCd=0",
@@ -90,7 +84,6 @@ def fetch_building(sigungu, bjdong, bun, ji):
             f"serviceKey={BUILDING_API_KEY}",
         ])
         return f"http://apis.data.go.kr/1613000/BldRgstService_v2/{ep}?{qs}"
-
     def parse(txt):
         try:
             root = ET.fromstring(txt)
@@ -98,8 +91,8 @@ def fetch_building(sigungu, bjdong, bun, ji):
             if code is not None and code.text != "00":
                 msg = root.find(".//resultMsg")
                 return {"error": msg.text if msg else "API 오류"}
-            items = root.findall(".//item")
-            return {"items": [{c.tag: (c.text or "") for c in i} for i in items]}
+            return {"items": [{c.tag: (c.text or "") for c in i}
+                               for i in root.findall(".//item")]}
         except Exception as e:
             return {"error": str(e)}
     try:
@@ -120,67 +113,82 @@ def addr_search(query):
         return []
 
 # ══════════════════════════════════════════════════
-# 지도 클릭 수신 처리
-# JS → localStorage → Python 폴링 방식
-# ══════════════════════════════════════════════════
-# 지도 클릭 시 JS가 sessionStorage에 좌표+타임스탬프를 기록하고
-# Streamlit hidden input에 값을 넣어 change event 발생 →
-# st.rerun() 트리거
+# ★ 핵심 아이디어
+# Streamlit text_input을 JS에서 직접 조작하는 방식
+# 1. 숨겨진 text_input ("coord_hidden")을 페이지에 렌더링
+# 2. 지도 iframe에서 클릭 시 postMessage로 좌표 전송
+# 3. Streamlit 메인 페이지의 JS가 해당 input에 값을 채우고
+#    Enter 이벤트 발생 → Streamlit이 rerun
 # ══════════════════════════════════════════════════
 
-# 클릭 좌표 수신용 숨겨진 컴포넌트
-click_data_raw = components.html(f"""
-<!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"></head>
-<body>
+# 숨겨진 좌표 수신 input (라벨에 특수 속성 마킹)
+coord_input = st.text_input(
+    "coord_hidden",
+    key="coord_hidden",
+    label_visibility="collapsed",
+    placeholder="",
+)
+
+# 지도 클릭 이벤트를 숨겨진 input에 주입하는 JS
+# Streamlit 페이지 자체에 인라인 스크립트 삽입
+st.markdown(f"""
 <script>
-// 부모(Streamlit)에서 메시지 수신 대기
-window.addEventListener('message', function(e) {{
-  if (e.data && e.data.type === 'mapClick') {{
-    // Streamlit에 클릭 데이터 전달
-    window.parent.postMessage({{
-      isStreamlitMessage: true,
-      type: 'streamlit:setComponentValue',
-      value: {{lat: e.data.lat, lng: e.data.lng, ts: e.data.ts}}
-    }}, '*');
-  }}
-}});
+(function() {{
+  // 지도 iframe에서 오는 mapClick 메시지 수신
+  window.addEventListener('message', function(e) {{
+    if (!e.data || e.data.type !== 'mapClick') return;
+    var lat = e.data.lat, lng = e.data.lng;
+    var val = lat + ',' + lng;
 
-// 준비 완료 신호
-window.parent.postMessage({{
-  isStreamlitMessage: true,
-  type: 'streamlit:componentReady',
-  apiVersion: 1
-}}, '*');
+    // Streamlit의 숨겨진 text_input을 찾아서 값 주입
+    // input 요소를 key로 찾음 (data-testid 활용)
+    var inputs = document.querySelectorAll('input[type="text"]');
+    for (var i = 0; i < inputs.length; i++) {{
+      var inp = inputs[i];
+      // placeholder가 비어있는 숨겨진 input 찾기
+      if (inp.closest('[data-testid="stTextInput"]') &&
+          inp.value === '' || inp.dataset.coordTarget === 'true') {{
+        // React controlled input에 값 주입하는 방법
+        var nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype, 'value').set;
+        nativeInputValueSetter.call(inp, val);
+
+        // React의 change 이벤트 트리거
+        inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
+        inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
+
+        // Enter 키 이벤트로 Streamlit rerun 트리거
+        inp.dispatchEvent(new KeyboardEvent('keydown', {{
+          key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true
+        }}));
+        break;
+      }}
+    }}
+  }});
+}})();
 </script>
-</body>
-</html>
-""", height=0)
+""", unsafe_allow_html=True)
 
-# 클릭 데이터 처리
-if (click_data_raw and isinstance(click_data_raw, dict)
-        and click_data_raw.get("ts", 0) > st.session_state.last_processed_ts):
-
-    ts  = click_data_raw["ts"]
-    lat = click_data_raw["lat"]
-    lng = click_data_raw["lng"]
-    st.session_state.last_processed_ts = ts
-    st.session_state.click_lat = lat
-    st.session_state.click_lng = lng
-    st.session_state.click_ts  = ts
-
-    # 좌표 → PNU 변환
-    pnu = coord2pnu(lat, lng)
-    if "error" not in pnu and pnu.get("sigungu"):
-        st.session_state.current_addr  = pnu["addr"]
-        st.session_state.building_data = fetch_building(
-            pnu["sigungu"], pnu["bjdong"], pnu["bun"], pnu["ji"])
-    else:
-        st.session_state.building_data = {"error": pnu.get("error", "주소 변환 실패")}
+# 좌표 input에 값이 들어왔으면 처리
+if coord_input and coord_input != st.session_state.last_coord:
+    st.session_state.last_coord = coord_input
+    try:
+        lat_s, lng_s = coord_input.split(",")
+        lat = float(lat_s); lng = float(lng_s)
+        with st.spinner("주소 변환 및 건축물대장 조회 중..."):
+            pnu = coord2pnu(lat, lng)
+        if "error" not in pnu and pnu.get("sigungu"):
+            st.session_state.current_addr = pnu["addr"]
+            with st.spinner("건축물대장 조회 중..."):
+                st.session_state.building_data = fetch_building(
+                    pnu["sigungu"], pnu["bjdong"], pnu["bun"], pnu["ji"])
+        else:
+            st.session_state.building_data = {"error": pnu.get("error", "주소 변환 실패")}
+    except Exception as e:
+        st.session_state.building_data = {"error": str(e)}
 
 # ══════════════════════════════════════════════════
-# 레이아웃: 좌측 패널 | 우측 카카오맵
+# 레이아웃
 # ══════════════════════════════════════════════════
 col_left, col_right = st.columns([10, 17], gap="small")
 
@@ -235,7 +243,6 @@ html,body{{height:100%;overflow:hidden;background:#07090f;
 </div>
 <div id="cb">지도를 클릭하면 건축물대장이 조회됩니다</div>
 <div id="hint">🖱 지도 클릭 → 즉시 조회</div>
-
 <script>
 var map, marker, circle, jijeokOn = false;
 
@@ -245,7 +252,6 @@ kakao.maps.load(function() {{
     level: 4,
   }});
 
-  // VWorld 지적도
   kakao.maps.Tileset.add('VW_LP', new kakao.maps.Tileset({{
     width:256, height:256, minZoom:1, maxZoom:21,
     getTileUrl: function(x,y,z) {{
@@ -253,7 +259,6 @@ kakao.maps.load(function() {{
     }},
   }}));
 
-  // ★ 지도 클릭 → parent의 숨겨진 컴포넌트로 postMessage
   kakao.maps.event.addListener(map, 'click', function(e) {{
     var lat = e.latLng.getLat(), lng = e.latLng.getLng();
     document.getElementById('cb').textContent =
@@ -262,12 +267,11 @@ kakao.maps.load(function() {{
     placeMark(lat, lng);
     map.panTo(e.latLng);
 
-    // parent(Streamlit)의 모든 iframe에 브로드캐스트
+    // ★ parent Streamlit 페이지로 좌표 전송
     window.parent.postMessage({{
       type: 'mapClick',
       lat:  lat,
       lng:  lng,
-      ts:   Date.now()
     }}, '*');
   }});
 
@@ -275,15 +279,6 @@ kakao.maps.load(function() {{
     if (!marker)
       document.getElementById('cb').textContent =
         'LAT '+e.latLng.getLat().toFixed(6)+'  ·  LNG '+e.latLng.getLng().toFixed(6);
-  }});
-
-  // 외부에서 지도 이동 명령
-  window.addEventListener('message', function(e) {{
-    if (e.data && e.data.type === 'moveMap') {{
-      map.setCenter(new kakao.maps.LatLng(e.data.lat, e.data.lng));
-      map.setLevel(3);
-      placeMark(e.data.lat, e.data.lng);
-    }}
   }});
 }});
 
@@ -325,7 +320,6 @@ function placeMark(lat, lng) {{
 # ── 좌측: 정보 패널 ──────────────────────────────
 with col_left:
 
-    # 헤더
     st.markdown("""
 <div style="background:#0d1117;border-bottom:1px solid rgba(255,255,255,.07);
   padding:11px 14px;margin-bottom:10px;">
@@ -345,7 +339,6 @@ with col_left:
     st.markdown('<p style="font-size:.61rem;font-weight:700;color:#38bdf8;letter-spacing:.1em;text-transform:uppercase;margin-bottom:4px;">🔍 주소 검색</p>', unsafe_allow_html=True)
     query = st.text_input("주소", placeholder="예: 강남구 테헤란로 152",
                           label_visibility="collapsed", key="addr_q")
-
     if st.button("검색", use_container_width=True, key="search_btn"):
         if query.strip():
             with st.spinner("검색 중..."):
@@ -355,13 +348,13 @@ with col_left:
             else:
                 st.warning("검색 결과가 없습니다.")
 
-    if "search_results" in st.session_state and st.session_state["search_results"]:
+    if st.session_state.get("search_results"):
         for i, doc in enumerate(st.session_state["search_results"]):
             road = doc.get("road_address")
             main = road["address_name"] if road else doc["address_name"]
             sub  = doc["address_name"] if road else ""
-            label = f"📍 {main}" + (f"\n↳ {sub}" if sub else "")
-            if st.button(label, key=f"sr_{i}", use_container_width=True):
+            if st.button(f"📍 {main}" + (f"\n↳ {sub}" if sub else ""),
+                         key=f"sr_{i}", use_container_width=True):
                 lat = float(doc["y"]); lng = float(doc["x"])
                 with st.spinner("조회 중..."):
                     pnu = coord2pnu(lat, lng)
@@ -370,13 +363,12 @@ with col_left:
                     st.session_state.building_data = fetch_building(
                         pnu["sigungu"], pnu["bjdong"], pnu["bun"], pnu["ji"])
                 else:
-                    st.session_state.building_data = {"error": pnu.get("error","주소 변환 실패")}
+                    st.session_state.building_data = {"error": pnu.get("error", "변환 실패")}
                 st.session_state["search_results"] = []
                 st.rerun()
 
     st.divider()
 
-    # 수동 PNU 입력
     with st.expander("⚙️ 수동 PNU 코드 입력"):
         sg = st.text_input("시군구코드(5자리)", max_chars=5, placeholder="11680", key="psg")
         bd = st.text_input("법정동코드(5자리)", max_chars=5, placeholder="10300", key="pbd")
@@ -394,7 +386,7 @@ with col_left:
 
     st.divider()
 
-    # ── 건물 정보 표시 ─────────────────────────────
+    # 결과 표시
     def fa(v):
         try: return f"{float(v):,.2f} ㎡"
         except: return v or "-"
@@ -412,8 +404,9 @@ with col_left:
   <div style="font-size:1.6rem;margin-bottom:7px;">🗺️</div>
   <div style="font-size:.79rem;font-weight:600;color:#c9d1d9;margin-bottom:5px;">지도를 클릭하세요</div>
   <div style="font-size:.69rem;color:#484f58;line-height:1.7;">
-    원하는 위치를 클릭하면<br>
-    <strong style="color:#38bdf8;">건축물대장 정보</strong>가 표시됩니다.
+    지도의 원하는 위치를 클릭하면<br>
+    <strong style="color:#38bdf8;">건축물대장 정보</strong>가 표시됩니다.<br><br>
+    <span style="color:#334155;font-size:.63rem;">또는 위에서 주소를 검색하세요</span>
   </div>
 </div>""", unsafe_allow_html=True)
 
@@ -515,6 +508,6 @@ with col_left:
         if st.button("↺ 초기화", use_container_width=True, key="reset_btn"):
             st.session_state.building_data = None
             st.session_state.current_addr  = ""
-            st.session_state.click_lat     = None
-            st.session_state.click_lng     = None
+            st.session_state.last_coord    = ""
+            st.session_state["search_results"] = []
             st.rerun()
