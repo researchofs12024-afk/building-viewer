@@ -30,20 +30,20 @@ html_code = f"""
 <script>
 var geojson = {geojson_str};
 
-kakao.maps.load(function() {
+kakao.maps.load(function() {{
 
-    var map = new kakao.maps.Map(document.getElementById('map'), {
+    var map = new kakao.maps.Map(document.getElementById('map'), {{
         center: new kakao.maps.LatLng(37.5636, 126.9976),
         level: 4
-    });
+    }});
 
     var selectedPolygon = null;
 
-    function pointInPolygon(point, vs) {
+    function pointInPolygon(point, vs) {{
         var x = point[0], y = point[1];
         var inside = false;
 
-        for (var i = 0, j = vs.length - 1; i < vs.length; j = i++) {
+        for (var i = 0, j = vs.length - 1; i < vs.length; j = i++) {{
             var xi = vs[i][0], yi = vs[i][1];
             var xj = vs[j][0], yj = vs[j][1];
 
@@ -51,54 +51,54 @@ kakao.maps.load(function() {
                 && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
 
             if (intersect) inside = !inside;
-        }
+        }}
 
         return inside;
-    }
+    }}
 
-    kakao.maps.event.addListener(map, 'click', function(mouseEvent) {
+    kakao.maps.event.addListener(map, 'click', function(mouseEvent) {{
 
         var lat = mouseEvent.latLng.getLat();
         var lng = mouseEvent.latLng.getLng();
 
-        if (selectedPolygon) {
+        if (selectedPolygon) {{
             selectedPolygon.setMap(null);
-        }
+        }}
 
-        for (var f of geojson.features) {
+        for (var f of geojson.features) {{
 
             var coords = f.geometry.coordinates;
 
-            for (var polygonSet of coords) {
-                for (var ring of polygonSet) {
+            for (var polygonSet of coords) {{
+                for (var ring of polygonSet) {{
 
-                    if (pointInPolygon([lng, lat], ring)) {
+                    if (pointInPolygon([lng, lat], ring)) {{
 
                         var path = ring.map(coord => 
                             new kakao.maps.LatLng(coord[1], coord[0])
                         );
 
-                        selectedPolygon = new kakao.maps.Polygon({
+                        selectedPolygon = new kakao.maps.Polygon({{
                             path: path,
                             strokeWeight: 2,
                             strokeColor: '#FF0000',
                             fillColor: '#FF0000',
                             fillOpacity: 0.3
-                        });
+                        }});
 
                         selectedPolygon.setMap(map);
                         return;
-                    }
-                }
-            }
+                    }}
+                }}
+            }}
 
-        }
+        }}
 
         console.log("필지 없음");
 
-    });
+    }});
 
-});
+}});
 </script>
 </body>
 </html>
